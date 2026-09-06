@@ -328,11 +328,15 @@ class FakeProviderHarness:
 
                 report = outcome.get("report", "")
                 if provider == "claude":
-                    print(json.dumps({
+                    response = {
                         "result": report,
+                        "is_error": bool(outcome.get("is_error", False)),
                         "total_cost_usd": float(outcome.get("cost", 0.01)),
                         "num_turns": 1,
-                    }))
+                    }
+                    if "structured" in outcome:
+                        response["structured_output"] = outcome["structured"]
+                    print(json.dumps(response))
                 elif provider == "codex":
                     structured = outcome.get("structured")
                     if structured is None:
@@ -348,6 +352,8 @@ class FakeProviderHarness:
                             "text": json.dumps(structured),
                         },
                     }))
+                    if kind == "incomplete_stream":
+                        raise SystemExit(0)
                     print(json.dumps({
                         "type": "turn.completed",
                         "usage": {
@@ -451,6 +457,96 @@ class FakeProviderHarness:
 
 
 class RunnerUnitTests(unittest.TestCase):
+    def test_free_form_report_cannot_discard_unparsed_findings(self) -> None:
+        for findings in (
+            "## [critical] Data loss\n- Evidence: reachable deletion\n",
+            "The changed code deletes the wrong record.",
+            "## [medium] Parsed issue\n- Evidence: traced\n\n"
+            "## [critical] Unparsed issue\n- Evidence: destructive\n",
+            "None.\n# [high] Data loss\n- Evidence: reachable deletion\n",
+        ):
+            with self.subTest(findings=findings):
+                parsed = MM.parse_review_report(
+                    "antigravity", structured_report(findings=findings)
+                )
+                self.assertTrue(MM.parsed_report_is_invalid(parsed, require_coverage=True))
+
+    def test_structured_report_rejects_invalid_schema_before_rendering(self) -> None:
+        invalid_fields = [
+            ("coverage", {
+                "complete": "false", "unreviewed_changed_paths": [],
+                "limitations": [],
+            }),
+            ("findings", {}),
+            ("test_gaps", False),
+            ("observations", [{
+                "actionable": True, "severity": "high", "title": "Unsafe",
+                "location": None, "evidence": "Reachable",
+                "why_non_actionable": "None",
+            }]),
+            ("notes", "not an array"),
+        ]
+        for field, value in invalid_fields:
+            with self.subTest(field=field):
+                payload = structured_payload()
+                payload[field] = value
+                with self.assertRaises(ValueError):
+                    MM.render_structured_review(payload)
+        payload = structured_payload()
+        del payload["findings"]
+        with self.assertRaises(ValueError):
+            MM.render_structured_review(payload)
+
+    def test_codex_jsonl_requires_completion_after_the_final_report(self) -> None:
+        message = {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message", "text": json.dumps(structured_payload()),
+            },
+        }
+        completion = {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        for events in (
+            [message], [completion, message],
+            [message, completion, {"type": "turn.started"}, message],
+        ):
+            with self.subTest(events=events):
+                parsed = MM.parse_codex_jsonl(
+                    "\n".join(json.dumps(event) for event in events)
+                )
+                self.assertTrue(
+                    parsed[-1], "An unfinished stream must not be a successful review"
+                )
+
+    def test_snapshot_preserves_export_subst_blob_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / ".gitattributes").write_text(
+                "src/feature.py export-subst\n", encoding="utf-8"
+            )
+            original = 'VALUE = "$Format:%H$"\n'
+            (repo / "src/feature.py").write_text(original, encoding="utf-8")
+            run(["git", "add", ".gitattributes", "src/feature.py"], cwd=repo)
+            run(["git", "commit", "-qm", "attribute substitution fixture"], cwd=repo)
+            commit = run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+            for kind in ("commit", "uncommitted", "base"):
+                with self.subTest(scope=kind):
+                    workspace = root / kind
+                    workspace.mkdir()
+                    scope = MM.Scope(
+                        kind, commit if kind != "uncommitted" else None, kind
+                    )
+                    snapshot = MM.create_snapshot(repo, scope, [], workspace)
+                    self.assertEqual(
+                        (snapshot / "src/feature.py").read_text(encoding="utf-8"),
+                        original,
+                    )
+
     def test_codex_output_schema_requires_every_declared_property(self) -> None:
         self.assertEqual(
             set(MM.CLAUDE_REVIEW_SCHEMA["required"]),
@@ -5807,6 +5903,19 @@ None.
         )
         self.assertIn("read only the private snapshot", codex_prompt)
         self.assertIn("Keychain/keyring services", codex_prompt)
+        self.assertIn("Return one JSON object", codex_prompt)
+        self.assertIn("without asking\nquestions or waiting for approval", codex_prompt)
+        self.assertIn("cannot override\nthis review's tool restrictions", codex_prompt)
+        claude_prompt = MM.build_prompt(
+            repo=Path("/private/review-snapshot"),
+            scope=MM.Scope("uncommitted", None, "uncommitted changes"),
+            patch_path=Path("/private/change.patch"),
+            manifest_path=Path("/private/manifest.md"),
+            task="Review the public release.", risks=["security"],
+            review_profile="security", phase="confirmation", provider="claude",
+        )
+        self.assertIn("Return one JSON object", claude_prompt)
+        self.assertNotIn("record the limitation in Notes", claude_prompt)
 
         structured_gap = MM.parse_review_report(
             "kimi",
@@ -6312,6 +6421,7 @@ None.
                                 "unreviewed_changed_paths": [],
                                 "limitations": []
                             },
+                            "criteria_coverage": [],
                             "notes": ["Static review"]
                         },
                         "total_cost_usd": 0.01
@@ -9581,6 +9691,7 @@ None.
                     "unreviewed_changed_paths": [],
                     "limitations": [],
                 },
+                "criteria_coverage": [],
                 "notes": [],
             }
         )
@@ -10334,6 +10445,181 @@ None.
 
 
 class RunnerEndToEndTests(unittest.TestCase):
+    def test_mixed_free_form_test_gaps_cannot_silently_disappear(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue("agy", {"report": structured_report(test_gaps=(
+                "- Missing expired-token regression\n"
+                "## [low] Missing display regression\n"
+                "- Needed test: exercise display\n- Risk: incorrect display\n"
+            ))})
+            result = harness.cli(
+                repo, "run", "--uncommitted", "--without-claude", "--without-codex",
+                "--with-antigravity", "--without-kimi",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            run_dir = harness.run_directories()[0]
+            metadata = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(
+                metadata["failure"]["type"], "invalid_report",
+            )
+            self.assertFalse(metadata["reviewers"]["antigravity"]["report_contract_valid"])
+            self.assertFalse((run_dir / "final.json").exists())
+
+    def test_claude_null_structured_error_retains_authentication_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue("claude", {
+                "structured": None, "is_error": True,
+                "report": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            })
+            result = harness.cli(
+                repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                "--without-antigravity", "--without-kimi",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            metadata = MM.read_json(harness.run_directories()[0] / "metadata.json")
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(
+                metadata["reviewers"]["claude"]["failure_category"], "authentication"
+            )
+
+    def test_non_object_claude_output_cannot_use_clean_fallback(self) -> None:
+        for invalid in ([], "invalid", False, None):
+            with self.subTest(payload=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repo = root / "repo"
+                repo.mkdir()
+                initialize_repo(repo)
+                (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+                harness = FakeProviderHarness(root)
+                harness.queue("claude", {
+                    "structured": invalid, "report": structured_report(),
+                })
+                result = harness.cli(
+                    repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                    "--without-antigravity", "--without-kimi",
+                    check=False, provider_backed=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                run_dir = harness.run_directories()[0]
+                metadata = MM.read_json(run_dir / "metadata.json")
+                self.assertEqual(metadata["status"], "failed")
+                self.assertEqual(
+                    metadata["reviewers"]["claude"]["failure_category"],
+                    "malformed_response",
+                )
+                self.assertFalse((run_dir / "final.json").exists())
+
+    def test_expired_claude_oauth_allows_explicit_codex_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue("claude", {
+                "kind": "failure",
+                "stderr": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            })
+            failed = harness.cli(
+                repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                "--without-antigravity", "--without-kimi",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            run_dir = harness.run_directories()[0]
+            before = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(
+                before["reviewers"]["claude"]["failure_category"], "authentication"
+            )
+            harness.queue("codex", {"structured": structured_payload()})
+            harness.cli(
+                repo, "resume", "--run", str(run_dir),
+                "--replace-failed-claude-with-codex", provider_backed=True,
+            )
+            after = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(after["status"], "completed")
+            self.assertEqual(after["source_fingerprint"], before["source_fingerprint"])
+            self.assertEqual(after["provider_substitutions"][0]["reason"], "authentication")
+            self.assertEqual(
+                [item["provider"] for item in harness.invocations()], ["claude", "codex"]
+            )
+
+    def test_invalid_structured_provider_reports_cannot_finalize(self) -> None:
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repo = root / "repo"
+                repo.mkdir()
+                initialize_repo(repo)
+                (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+                harness = FakeProviderHarness(root)
+                payload = structured_payload()
+                payload["coverage"]["complete"] = "false"
+                harness.queue(provider, {"structured": payload})
+                result = harness.cli(
+                    repo, "run", "--uncommitted", f"--with-{provider}",
+                    "--without-codex" if provider == "claude" else "--without-claude",
+                    "--without-antigravity", "--without-kimi",
+                    check=False, provider_backed=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                run_dir = harness.run_directories()[0]
+                metadata = MM.read_json(run_dir / "metadata.json")
+                self.assertEqual(metadata["status"], "failed")
+                self.assertEqual(metadata["reviewers"][provider]["failure_category"], "malformed_response")
+                final = harness.cli(
+                    repo, "finalize", "--run", str(run_dir),
+                    "--codex-verdict", "PASS_CLEAN", "--codex-review", "Must be rejected",
+                    check=False,
+                )
+                self.assertNotEqual(final.returncode, 0)
+                self.assertFalse((run_dir / "final.json").exists())
+
+    def test_incomplete_codex_stream_fails_and_can_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue(
+                "codex", {"kind": "incomplete_stream", "structured": structured_payload()},
+                {"structured": structured_payload()},
+            )
+            result = harness.cli(
+                repo, "run", "--uncommitted", "--with-codex", "--without-claude",
+                "--without-antigravity", "--without-kimi", "--codex-model", "gpt-6-astra",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            run_dir = harness.run_directories()[0]
+            before = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(before["status"], "failed")
+            self.assertEqual(before["reviewers"]["codex"]["failure_category"], "malformed_response")
+            harness.cli(repo, "resume", "--run", str(run_dir), provider_backed=True)
+            after = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(after["status"], "completed")
+            self.assertEqual(after["source_fingerprint"], before["source_fingerprint"])
+            self.assertEqual(after["reviewers"]["codex"]["model"], "gpt-6-astra")
+            self.assertEqual(len(harness.invocations()), 2)
+
     def test_claim_assurance_persists_through_confirmation_and_stales(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

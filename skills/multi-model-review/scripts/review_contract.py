@@ -145,6 +145,46 @@ CLAUDE_REVIEW_SCHEMA: dict[str, Any] = {
 }
 
 
+def validate_structured_review(
+    value: Any,
+    schema: dict[str, Any] = CLAUDE_REVIEW_SCHEMA,
+    path: str = "review",
+) -> None:
+    """Enforce the report schema locally before coercion can erase evidence.
+
+    This checks the small schema vocabulary used by CLAUDE_REVIEW_SCHEMA;
+    provider-side structured output enforcement is not a trust boundary.
+    Errors identify fields, never echo potentially sensitive provider values.
+    """
+    types = schema["type"]
+    types = types if isinstance(types, list) else [types]
+    actual_type = (
+        "null" if value is None else
+        "boolean" if isinstance(value, bool) else
+        "string" if isinstance(value, str) else
+        "array" if isinstance(value, list) else
+        "object" if isinstance(value, dict) else "unsupported"
+    )
+    if actual_type not in types:
+        raise ValueError(f"Invalid structured review field type at {path}.")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"Invalid structured review enum at {path}.")
+    if "const" in schema and value != schema["const"]:
+        raise ValueError(f"Invalid structured review constant at {path}.")
+    if actual_type == "object":
+        properties = schema["properties"]
+        if any(key not in value for key in schema.get("required", [])):
+            raise ValueError(f"Missing structured review fields at {path}.")
+        if schema.get("additionalProperties") is False and value.keys() - properties.keys():
+            raise ValueError(f"Unexpected structured review fields at {path}.")
+        for key, child_schema in properties.items():
+            if key in value:
+                validate_structured_review(value[key], child_schema, f"{path}.{key}")
+    elif actual_type == "array":
+        for index, item in enumerate(value):
+            validate_structured_review(item, schema["items"], f"{path}[{index}]")
+
+
 def render_field(value: Any) -> str:
     """Render one provider field value so its content cannot become structure.
 
@@ -158,6 +198,7 @@ def render_field(value: Any) -> str:
 
 def render_structured_review(payload: dict[str, Any]) -> str:
     """Render a schema-validated provider result into the audit Markdown format."""
+    validate_structured_review(payload)
     lines = ["# Verdict", render_field(payload["verdict"]), "", "# Findings"]
     findings = payload.get("findings") or []
     if not findings:
@@ -662,7 +703,41 @@ def parse_review_report(
         ),
         "notes": parse_notes(report),
         "duplicate_sections": duplicate_report_sections(report),
+        "unknown_sections": sorted({
+            match.group(1).strip()
+            for match in re.finditer(r"(?m)^#\s+([^\r\n]*)", report)
+            if match.group(1).strip().casefold()
+            not in {name.casefold() for name in REPORT_SECTIONS}
+        }),
+        "unparsed_item_sections": unparsed_item_sections(report),
     }
+
+
+def unparsed_item_sections(report: str) -> list[str]:
+    """Reject free-form item content that the severity parser would discard."""
+    invalid: list[str] = []
+    heading = re.compile(r"##\s+\[(blocker|high|medium|low)\]\s+\S.*", re.I)
+    for name in ("Findings", "Test gaps", "Observations"):
+        section = markdown_section(report, name)
+        if not section and name == "Observations":
+            continue  # Older free-form reports did not require this section.
+        if section.lower() in {"none", "none."}:
+            continue
+        lines = section.splitlines()
+        first = lines[0] if lines else ""
+        legacy_bullets = name == "Test gaps" and first.startswith("- ")
+        if not heading.fullmatch(first) and not legacy_bullets:
+            invalid.append(name)
+            continue
+        if legacy_bullets and any(heading.fullmatch(line) for line in lines):
+            invalid.append(name)
+            continue  # Heading parsing would suppress the leading bullet gaps.
+        if any(
+            line.startswith("##") and not heading.fullmatch(line)
+            for line in lines
+        ):
+            invalid.append(name)
+    return invalid
 
 
 def parsed_report_is_invalid(
@@ -674,6 +749,10 @@ def parsed_report_is_invalid(
     ):
         return True
     if parsed.get("duplicate_sections"):
+        return True
+    if require_coverage and (
+        parsed.get("unparsed_item_sections") or parsed.get("unknown_sections")
+    ):
         return True
     criteria_coverage = parsed.get("criteria_coverage")
     if not isinstance(criteria_coverage, dict) or not criteria_coverage.get(

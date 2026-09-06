@@ -13,6 +13,20 @@ external-model opinion. It requires ChatGPT authentication, receives a minimal
 non-secret process environment, and exposes no shell or exec tool; never
 forward API-key authentication to it.
 
+The controller may use GPT-6 Astra without changing the workflow. The optional
+Codex reviewer has a separate model selection: its isolated `CODEX_HOME`
+excludes personal model/reasoning settings, and `default` means the installed
+CLI's default. When GPT-6 reviewer coverage is requested, use
+`--with-codex --codex-model gpt-6-astra` for repair and confirmation, or
+`set-model codex gpt-6-astra` for an explicitly requested persistent setting.
+Do not infer reviewer model identity from the controller's model. Preserve
+existing explicit pins unless the user requests changing them.
+
+Continue authorized inspection, fixes, and verification through the final gate.
+Resolve routine workflow choices from the task context. Ask only when missing
+information or authority materially affects the task; mandatory confirmation
+means an independent review round, not another user approval prompt.
+
 The runner requires Python 3.12 or newer. Resolve and verify the interpreter
 before the first command; on macOS, `/usr/bin/python3` may still be Python 3.9.
 An unsupported interpreter is rejected before workflow or provider activity.
@@ -624,7 +638,8 @@ The runner:
 - pins an adaptive fast, balanced, or deep repair limit followed by a mandatory confirmation;
 - pins each repository's scope, paths, risks, profile, and task across rounds;
 - requires schema-constrained Claude and Codex output contracts and safely
-  normalizes contradictory verdicts;
+  validates structured field types and required fields locally before rendering;
+  safely normalizes contradictory verdicts and rejects unfinished Codex streams;
 - requires structured reviewer coverage, persists notes and uncovered changed
   paths, and blocks finalization until incomplete confirmation coverage is
   independently rerun or explicitly compensated by Codex evidence;
