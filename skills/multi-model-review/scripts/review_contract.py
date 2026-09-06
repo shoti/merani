@@ -703,6 +703,12 @@ def parse_review_report(
         ),
         "notes": parse_notes(report),
         "duplicate_sections": duplicate_report_sections(report),
+        "unknown_sections": sorted({
+            match.group(1).strip()
+            for match in re.finditer(r"(?m)^#\s+([^\r\n]*)", report)
+            if match.group(1).strip().casefold()
+            not in {name.casefold() for name in REPORT_SECTIONS}
+        }),
         "unparsed_item_sections": unparsed_item_sections(report),
     }
 
@@ -723,6 +729,9 @@ def unparsed_item_sections(report: str) -> list[str]:
         if not heading.fullmatch(first) and not legacy_bullets:
             invalid.append(name)
             continue
+        if legacy_bullets and any(heading.fullmatch(line) for line in lines):
+            invalid.append(name)
+            continue  # Heading parsing would suppress the leading bullet gaps.
         if any(
             line.startswith("##") and not heading.fullmatch(line)
             for line in lines
@@ -741,7 +750,9 @@ def parsed_report_is_invalid(
         return True
     if parsed.get("duplicate_sections"):
         return True
-    if require_coverage and parsed.get("unparsed_item_sections"):
+    if require_coverage and (
+        parsed.get("unparsed_item_sections") or parsed.get("unknown_sections")
+    ):
         return True
     criteria_coverage = parsed.get("criteria_coverage")
     if not isinstance(criteria_coverage, dict) or not criteria_coverage.get(

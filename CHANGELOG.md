@@ -11,9 +11,13 @@ All notable user-visible changes are documented here. This project follows
   `export-subst` content so reviewers inspect the exact selected source bytes.
 - Validate structured reviewer reports locally before rendering: malformed
   field types, missing fields, and actionable observations cannot turn into
-  clean findings or complete coverage through coercion.
+  clean findings or complete coverage through coercion. A present non-object
+  Claude payload cannot fall back to clean Markdown; explicit provider errors
+  retain their typed failure category.
 - Reject free-form findings sections with unrecognized headings or unstructured
-  defect prose instead of silently discarding their contents from triage.
+  defect prose instead of silently discarding their contents from triage,
+  including unknown top-level headings that would terminate section parsing
+  and mixed bullet/heading test gaps that would drop leading items.
 - Reject a Codex report unless its stream includes a subsequent completed turn;
   preserve the failed attempt and allow normal unchanged-source resume.
 - Classify expired Claude OAuth sessions as authentication failures so explicit

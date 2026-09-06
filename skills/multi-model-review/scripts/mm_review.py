@@ -3372,6 +3372,9 @@ def invoke_reviewer(
                             run_dir / "claude.structured.json",
                             json.dumps(structured, indent=2, sort_keys=True) + "\n",
                         )
+                elif "structured_output" in payload and not payload.get("is_error"):
+                    malformed_provider_response = True
+                    report = result if isinstance(result, str) else ""
                 elif isinstance(result, str):
                     report = result
                 usage = {

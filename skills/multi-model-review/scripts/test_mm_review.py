@@ -330,6 +330,7 @@ class FakeProviderHarness:
                 if provider == "claude":
                     response = {
                         "result": report,
+                        "is_error": bool(outcome.get("is_error", False)),
                         "total_cost_usd": float(outcome.get("cost", 0.01)),
                         "num_turns": 1,
                     }
@@ -462,6 +463,7 @@ class RunnerUnitTests(unittest.TestCase):
             "The changed code deletes the wrong record.",
             "## [medium] Parsed issue\n- Evidence: traced\n\n"
             "## [critical] Unparsed issue\n- Evidence: destructive\n",
+            "None.\n# [high] Data loss\n- Evidence: reachable deletion\n",
         ):
             with self.subTest(findings=findings):
                 parsed = MM.parse_review_report(
@@ -10443,6 +10445,85 @@ None.
 
 
 class RunnerEndToEndTests(unittest.TestCase):
+    def test_mixed_free_form_test_gaps_cannot_silently_disappear(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue("agy", {"report": structured_report(test_gaps=(
+                "- Missing expired-token regression\n"
+                "## [low] Missing display regression\n"
+                "- Needed test: exercise display\n- Risk: incorrect display\n"
+            ))})
+            result = harness.cli(
+                repo, "run", "--uncommitted", "--without-claude", "--without-codex",
+                "--with-antigravity", "--without-kimi",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            run_dir = harness.run_directories()[0]
+            metadata = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(
+                metadata["failure"]["type"], "invalid_report",
+            )
+            self.assertFalse(metadata["reviewers"]["antigravity"]["report_contract_valid"])
+            self.assertFalse((run_dir / "final.json").exists())
+
+    def test_claude_null_structured_error_retains_authentication_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.queue("claude", {
+                "structured": None, "is_error": True,
+                "report": "Failed to authenticate: OAuth session expired and could not be refreshed",
+            })
+            result = harness.cli(
+                repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                "--without-antigravity", "--without-kimi",
+                check=False, provider_backed=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            metadata = MM.read_json(harness.run_directories()[0] / "metadata.json")
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(
+                metadata["reviewers"]["claude"]["failure_category"], "authentication"
+            )
+
+    def test_non_object_claude_output_cannot_use_clean_fallback(self) -> None:
+        for invalid in ([], "invalid", False, None):
+            with self.subTest(payload=invalid), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                repo = root / "repo"
+                repo.mkdir()
+                initialize_repo(repo)
+                (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+                harness = FakeProviderHarness(root)
+                harness.queue("claude", {
+                    "structured": invalid, "report": structured_report(),
+                })
+                result = harness.cli(
+                    repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                    "--without-antigravity", "--without-kimi",
+                    check=False, provider_backed=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                run_dir = harness.run_directories()[0]
+                metadata = MM.read_json(run_dir / "metadata.json")
+                self.assertEqual(metadata["status"], "failed")
+                self.assertEqual(
+                    metadata["reviewers"]["claude"]["failure_category"],
+                    "malformed_response",
+                )
+                self.assertFalse((run_dir / "final.json").exists())
+
     def test_expired_claude_oauth_allows_explicit_codex_substitution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
