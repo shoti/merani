@@ -7,6 +7,22 @@ All notable user-visible changes are documented here. This project follows
 
 ### Fixed
 
+- Verify archived snapshot blobs against Git object IDs and restore transformed
+  `export-subst` content so reviewers inspect the exact selected source bytes.
+- Validate structured reviewer reports locally before rendering: malformed
+  field types, missing fields, and actionable observations cannot turn into
+  clean findings or complete coverage through coercion.
+- Reject free-form findings sections with unrecognized headings or unstructured
+  defect prose instead of silently discarding their contents from triage.
+- Reject a Codex report unless its stream includes a subsequent completed turn;
+  preserve the failed attempt and allow normal unchanged-source resume.
+- Classify expired Claude OAuth sessions as authentication failures so explicit
+  Claude-to-Codex substitution remains available with the original evidence.
+- Clarify headless reviewer completion and instruction precedence for GPT-6,
+  use the structured output instruction for both Claude and Codex, and put tool
+  limitations under Coverage consistently. Document separate controller and
+  reviewer model selection without changing saved provider preferences.
+
 - Open evidence-memory search and status queries through a true read-only
   SQLite connection, avoiding schema and permission writes for logical reads.
 - Decode malformed output bytes from non-Codex reviewer processes with

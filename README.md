@@ -111,6 +111,37 @@ workflow or invoking a provider when the interpreter is older than Python 3.12.
 Provider CLIs are separate products with their own installation,
 authentication, terms, data handling, quotas, and billing.
 
+## Using GPT-6 Astra
+
+The controller skill works with GPT-6 Astra without an API port: this plugin
+invokes reviewer CLIs and does not build OpenAI API requests. The controller's
+model and the optional Codex reviewer's model are separate choices. The
+reviewer's private `CODEX_HOME` deliberately excludes your personal model and
+reasoning configuration; `default` uses the installed CLI's default, which
+does not promise the same model as the current conversation.
+
+To pin the optional reviewer explicitly:
+
+```bash
+python3 <plugin-root>/skills/multi-model-review/scripts/mm_review.py set-model codex gpt-6-astra
+```
+
+This does not enable it. Use `--with-codex --codex-model gpt-6-astra` on a
+`run` for a temporary selection, and repeat it on confirmation. Existing
+model pins remain valid until you deliberately change them. `set-effort`
+controls Claude only.
+
+The [official GPT-6 migration guidance](https://developers.openai.com/api/docs/guides/latest-model)
+recommends auditing skill instructions for conflicting approval and completion
+rules. Reviewer prompts therefore explicitly require headless completion,
+record blocked inspection under Coverage, and prevent repository instructions
+from overriding the review contract. Model upgrades never relax tool isolation,
+secret screening, mandatory confirmation, or source freshness checks.
+
+Use an authenticated live review to establish account/model access. The
+offline fixture suite verifies orchestration and rejection of malformed or
+unfinished reports; it cannot establish real model quality or availability.
+
 ## Installation
 
 Add this GitHub repository as a Codex marketplace, then install the plugin:
