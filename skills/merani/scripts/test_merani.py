@@ -6652,8 +6652,8 @@ None.
                     reviewers=[reviewer],
                     results=[first],
                 )
-            MM.archive_reviewer_artifacts(
-                run_dir, "claude", metadata["reviewers"]["claude"]
+            MM.archive_reviewer_artifacts_batch(
+                run_dir, ["claude"], metadata["reviewers"]
             )
             report.write_text(
                 "# Verdict\nPASS_CLEAN\n\n# Findings\nNone.\n\n"

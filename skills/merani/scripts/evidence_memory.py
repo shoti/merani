@@ -20,15 +20,6 @@ def normalized_text(value: Any) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", str(value).lower()))
 
 
-def title_similarity(left: Any, right: Any) -> float:
-    """Measure deterministic token overlap without model calls or embeddings."""
-    left_tokens = set(normalized_text(left).split())
-    right_tokens = set(normalized_text(right).split())
-    if not left_tokens or not right_tokens:
-        return 0.0
-    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-
-
 def _field_relevance(query_tokens: set[str], value: Any) -> float:
     """Score a field without letting one broad token dominate retrieval."""
     if value is None:
