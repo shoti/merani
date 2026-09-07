@@ -9,7 +9,7 @@ the project publishes stable releases, older snapshots are not maintained.
 
 Please use GitHub's private vulnerability reporting flow:
 
-https://github.com/shoti/codex-multi-model-review/security/advisories/new
+https://github.com/shoti/merani/security/advisories/new
 
 Include:
 
@@ -30,9 +30,9 @@ and fingerprints, but the snapshot retains the tracked Git tree for review
 context. Provider CLIs use their own authentication, data-handling terms,
 quotas, and billing.
 
-The built-in secret scan focuses on changed material. It reduces accidental
-disclosure but cannot prove that a snapshot is safe to share or detect every
-secret in unchanged tracked files.
+The built-in secret scan covers the outgoing snapshot and deleted patch
+material. It reduces accidental disclosure but cannot detect every secret or
+prove that a snapshot is safe to share.
 
 Reviewers are restricted to read/search operations and work from private
 immutable snapshots. Codex remains responsible for validating findings and for

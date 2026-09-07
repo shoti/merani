@@ -77,9 +77,14 @@ class ReviewError(RuntimeError):
     """A user-actionable review runner failure."""
 
 
-def state_dir_from_environment(name: str, default: Path) -> Path:
+def state_dir_from_environment(
+    name: str, default: Path, *, legacy_name: str | None = None
+) -> Path:
     """Resolve one private state directory without cwd-dependent ambiguity."""
     raw_value = os.environ.get(name)
+    if raw_value is None and legacy_name is not None:
+        name = legacy_name
+        raw_value = os.environ.get(name)
     if raw_value is None:
         return default.expanduser().resolve()
     candidate = Path(raw_value).expanduser()
@@ -90,15 +95,19 @@ def state_dir_from_environment(name: str, default: Path) -> Path:
     return candidate.resolve()
 
 
+# Keep existing reviewer preferences and provider health after the rename.
+_LEGACY_CONFIG_DIR = Path.home() / ".config" / "multi-model-review"
 CONFIG_DIR = state_dir_from_environment(
-    "MM_REVIEW_CONFIG_DIR",
-    Path.home() / ".config" / "multi-model-review",
+    "MERANI_CONFIG_DIR",
+    _LEGACY_CONFIG_DIR if _LEGACY_CONFIG_DIR.exists() else Path.home() / ".config" / "merani",
+    legacy_name="MM_REVIEW_CONFIG_DIR",
 )
 CONFIG_PATH = CONFIG_DIR / "config.json"
 PROVIDER_HEALTH_PATH = CONFIG_DIR / "provider-health.json"
 RUNS_DIR = state_dir_from_environment(
-    "MM_REVIEW_RUNS_DIR",
+    "MERANI_RUNS_DIR",
     Path.home() / ".codex" / "review-runs",
+    legacy_name="MM_REVIEW_RUNS_DIR",
 )
 WORKFLOWS_DIR = RUNS_DIR / "workflows"
 SENSITIVE_SCANS_DIR = RUNS_DIR / "sensitive-scans"
@@ -113,7 +122,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = SKILL_DIR.parents[1]
 KIMI_AGENT_PATH = SKILL_DIR / "references" / "kimi-reviewer.md"
 ANTIGRAVITY_AGENT_PATH = SKILL_DIR / "references" / "antigravity-agent.md"
-ANTIGRAVITY_AGENT_NAME = "codex-multi-model-review-read-only-v1"
+ANTIGRAVITY_AGENT_NAME = "merani-read-only-v1"
 ANTIGRAVITY_AGENT_INSTALL_PATH = (
     Path.home()
     / ".gemini"
@@ -445,10 +454,10 @@ def runtime_identity(
 def private_state_permission_hint(path: Path) -> str:
     """Return relocation guidance for the private store containing path."""
     if path.is_relative_to(RUNS_DIR):
-        variable = "MM_REVIEW_RUNS_DIR"
+        variable = "MERANI_RUNS_DIR"
         store = "artifact"
     elif path.is_relative_to(CONFIG_DIR):
-        variable = "MM_REVIEW_CONFIG_DIR"
+        variable = "MERANI_CONFIG_DIR"
         store = "configuration"
     else:
         return ""
@@ -2018,7 +2027,7 @@ def antigravity_agent_readiness() -> ProviderReadiness:
     if not ANTIGRAVITY_AGENT_INSTALL_PATH.is_file():
         return ProviderReadiness(
             False,
-            "read-only agent is missing; run `mm-review install-antigravity-agent`",
+            "read-only agent is missing; run `merani install-antigravity-agent`",
         )
     try:
         bundled = ANTIGRAVITY_AGENT_PATH.read_text(encoding="utf-8")
@@ -2032,7 +2041,7 @@ def antigravity_agent_readiness() -> ProviderReadiness:
         return ProviderReadiness(
             False,
             "read-only agent is outdated; run "
-            "`mm-review install-antigravity-agent`",
+            "`merani install-antigravity-agent`",
         )
     return ProviderReadiness(True, "read-only agent verified")
 
@@ -2257,7 +2266,7 @@ def reviewer_definitions(
         if not config["claude"].get("allow_run_override", True):
             raise ReviewError(
                 "Claude is locked off in persistent configuration. Run "
-                "`mm-review enable claude` before using a one-run override."
+                "`merani enable claude` before using a one-run override."
             )
         claude_enabled = True
     if args.without_claude:
@@ -2266,7 +2275,7 @@ def reviewer_definitions(
         if not config["codex"].get("allow_run_override", True):
             raise ReviewError(
                 "Codex is locked off in persistent configuration. Run "
-                "`mm-review enable codex` before using a one-run override."
+                "`merani enable codex` before using a one-run override."
             )
         codex_enabled = True
     if args.without_codex:
@@ -2275,7 +2284,7 @@ def reviewer_definitions(
         if not config["antigravity"].get("allow_run_override", True):
             raise ReviewError(
                 "Antigravity is locked off in persistent configuration. "
-                "Run `mm-review enable antigravity` before using a one-run "
+                "Run `merani enable antigravity` before using a one-run "
                 "override."
             )
         antigravity_enabled = True
@@ -2285,7 +2294,7 @@ def reviewer_definitions(
         if not config["kimi"].get("allow_run_override", True):
             raise ReviewError(
                 "Kimi is locked off in persistent configuration. Run "
-                "`mm-review enable kimi` before using a one-run override."
+                "`merani enable kimi` before using a one-run override."
             )
         kimi_enabled = True
     if args.without_kimi:
@@ -2794,7 +2803,7 @@ def isolated_codex_home(*, workspace_roots: Sequence[Path]) -> Any:
     """Stage Codex auth privately while denying reviewer reads outside roots."""
     source_home = codex_home_from_environment()
     source_auth = source_home / "auth.json"
-    with tempfile.TemporaryDirectory(prefix="mm-review-codex-home-") as name:
+    with tempfile.TemporaryDirectory(prefix="merani-codex-home-") as name:
         isolated_home = Path(name)
         isolated_home.chmod(0o700)
         if not source_auth.is_file():
@@ -3134,7 +3143,7 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                     "protocolVersion": requested_version or "2025-06-18",
                     "capabilities": {"tools": {}},
                     "serverInfo": {
-                        "name": "multi-model-review-files",
+                        "name": "merani-files",
                         "version": "1.0.0",
                     },
                 }
@@ -3505,7 +3514,7 @@ def make_run_dir(repo: Path, repository_id: str) -> Path:
     except OSError as exc:
         raise ReviewError(
             f"Cannot create the private review artifact directory {parent}: "
-            f"{exc}. Set MM_REVIEW_RUNS_DIR to an absolute private writable "
+            f"{exc}. Set MERANI_RUNS_DIR to an absolute private writable "
             "directory for this workflow or approve access."
         ) from exc
     run_dir = parent / timestamp
@@ -3518,7 +3527,7 @@ def make_run_dir(repo: Path, repository_id: str) -> Path:
     except OSError as exc:
         raise ReviewError(
             f"Cannot create the private review run directory {run_dir}: {exc}. "
-            "Set MM_REVIEW_RUNS_DIR to an absolute private writable directory "
+            "Set MERANI_RUNS_DIR to an absolute private writable directory "
             "for this workflow or approve access."
         ) from exc
     return run_dir
@@ -4197,7 +4206,7 @@ def require_active_workflow(identifier: str) -> dict[str, Any]:
     if not path.exists():
         raise ReviewError(
             f"Unknown workflow {identifier}. Create it with "
-            "`mm-review workflow start`."
+            "`merani workflow start`."
         )
     workflow = read_json(path)
     if workflow.get("status") == "superseded":
@@ -4214,7 +4223,7 @@ def require_active_workflow(identifier: str) -> dict[str, Any]:
     if workflow.get("status") == "completed":
         raise ReviewError(
             f"Workflow {identifier} is completed and cannot accept new reviews. "
-            f"Create a linked successor with `mm-review workflow supersede "
+            f"Create a linked successor with `merani workflow supersede "
             f"{identifier} --reason \"source or contract changed\"`."
         )
     return workflow
@@ -4887,7 +4896,7 @@ def validate_workflow_phase(
     if completed_confirmations:
         raise ReviewError(
             "This repository already has a completed confirmation round. "
-            f"Create a linked successor with `mm-review workflow supersede "
+            f"Create a linked successor with `merani workflow supersede "
             f"{identifier} --reason \"source changed after confirmation\"`."
         )
     if phase == "repair":
@@ -5004,7 +5013,7 @@ def validate_review_contract(
             )
         raise ReviewError(
             "Review contract drifted from the first completed repair for this "
-            "repository. Create a linked successor with `mm-review workflow "
+            "repository. Create a linked successor with `merani workflow "
             f"supersede {identifier} --reason \"review contract changed\"` "
             "to change: "
             + ", ".join(mismatches)
@@ -6462,7 +6471,7 @@ def enforce_review_admission(
             f"rerun with --claude-max-budget-usd {budget_override:.2f}"
         )
     alternatives.append(
-        "increase audited recovery headroom with `mm-review workflow "
+        "increase audited recovery headroom with `merani workflow "
         f"raise-provider-attempt-limit {workflow_id} --to {required_limit} "
         "--reason \"reserve review recovery headroom\"`"
     )
@@ -6569,7 +6578,7 @@ def recommend_mode_command(args: argparse.Namespace) -> int:
                 "risks": risks,
                 "reasons": reasons,
                 "command": (
-                    "mm-review workflow start --review-mode " + mode
+                    "merani workflow start --review-mode " + mode
                 ),
             },
             indent=2,
@@ -7277,7 +7286,7 @@ def workflow_continue_plan(
                 ),
                 "command": shlex.join(
                     [
-                        "mm-review",
+                        "merani",
                         "workflow",
                         "supersede",
                         identifier,
@@ -7300,7 +7309,7 @@ def workflow_continue_plan(
                     ),
                     "type": "attest_commit",
                     "command": (
-                        "mm-review attest-commit --run "
+                        "merani attest-commit --run "
                         f"{shlex.quote(str(item.get('run_dir')))} --commit HEAD"
                     ),
                     "reason": (
@@ -7352,7 +7361,7 @@ def workflow_continue_plan(
                 ],
                 "command": shlex.join(
                     [
-                        "mm-review",
+                        "merani",
                         "workflow",
                         "supersede",
                         identifier,
@@ -7385,7 +7394,7 @@ def workflow_continue_plan(
                 ),
                 "command": shlex.join(
                     [
-                        "mm-review",
+                        "merani",
                         "run",
                         "--repo",
                         str(root or "<repository>"),
@@ -7413,7 +7422,7 @@ def workflow_continue_plan(
                     "first repair with repo, scope, paths, risks, and task."
                 ),
                 "command": (
-                    f"mm-review run --workflow-id {shlex.quote(identifier)} "
+                    f"merani run --workflow-id {shlex.quote(identifier)} "
                     "--phase repair --uncommitted --task \"<intent>\""
                 ),
             }
@@ -7481,7 +7490,7 @@ def workflow_continue_plan(
                     {
                         "type": "resume",
                         "automatable": True,
-                        "command": f"mm-review resume --run {shlex.quote(str(run_dir))}",
+                        "command": f"merani resume --run {shlex.quote(str(run_dir))}",
                     }
                 )
         elif run_status in {"failed", "preflight_blocked"}:
@@ -7501,7 +7510,7 @@ def workflow_continue_plan(
                         "type": "triage",
                         "reason": issues,
                         "command": (
-                            f"mm-review decide --run {shlex.quote(str(run_dir))} ..."
+                            f"merani decide --run {shlex.quote(str(run_dir))} ..."
                         ),
                     }
                 )
@@ -7538,7 +7547,7 @@ def workflow_continue_plan(
                             "local_gate_required": changed_after_fix,
                             "command": shlex.join(
                                 [
-                                    "mm-review",
+                                    "merani",
                                     "run",
                                     "--repo",
                                     str(repository.get("root")),
@@ -7583,7 +7592,7 @@ def workflow_continue_plan(
                                     "two recovery attempts available."
                                 ),
                                 "raise_command": (
-                                    "mm-review workflow raise-provider-attempt-limit "
+                                    "merani workflow raise-provider-attempt-limit "
                                     f"{shlex.quote(identifier)} --to {recommended_to} "
                                     '--reason "reserve confirmation recovery headroom"'
                                 ),
@@ -7630,7 +7639,7 @@ def workflow_continue_plan(
                                         else ["assurance.json is missing"]
                                     ),
                                     "command": (
-                                        "mm-review assure --run "
+                                        "merani assure --run "
                                         f"{shlex.quote(str(run_dir))} --claim "
                                         "<claim-id> --status verified "
                                         "--evidence-kind <kind> --evidence "
@@ -7644,7 +7653,7 @@ def workflow_continue_plan(
                                 {
                                     "type": "codex_final",
                                     "command": (
-                                        f"mm-review gate {shlex.quote(identifier)} "
+                                        f"merani gate {shlex.quote(identifier)} "
                                         "--codex-verdict <verdict> --codex-review "
                                         '"<evidence-backed final review>"'
                                     ),
@@ -7774,7 +7783,7 @@ def review_next_guidance(
         if has_observations:
             actions.append("acknowledge every observation")
         guidance = (
-            f"Next: {' and '.join(actions)} with `mm-review decide` or "
+            f"Next: {' and '.join(actions)} with `merani decide` or "
             f"`decide-batch` before continuing.{coverage_guidance}"
         )
         if phase == "confirmation":
@@ -7830,7 +7839,7 @@ def _execute_continue_action(identifier: str, action: dict[str, Any]) -> str:
     if not isinstance(command, str):
         raise ReviewError("Continuation action has no executable command.")
     argv = shlex.split(command)
-    if argv and argv[0] == "mm-review":
+    if argv and argv[0] in {"merani", "mm-review"}:
         argv = argv[1:]
     parsed = build_parser().parse_args(argv)
     output = io.StringIO()
@@ -7886,7 +7895,7 @@ def gate_command(args: argparse.Namespace) -> int:
     if not workflow_path(args.workflow_id).exists():
         raise ReviewError(
             f"Unknown workflow {args.workflow_id}. Create it with "
-            "`mm-review workflow start`."
+            "`merani workflow start`."
         )
     logs: list[str] = []
     plan = workflow_continue_plan(args.workflow_id, probe_usage=True)
@@ -7924,7 +7933,7 @@ def gate_command(args: argparse.Namespace) -> int:
     if not codex_actions and (args.codex_verdict or args.codex_review):
         raise ReviewError(
             "No confirmation run is awaiting a Codex final verdict. Inspect "
-            "`mm-review gate <workflow-id>` without verdict arguments first."
+            "`merani gate <workflow-id>` without verdict arguments first."
         )
     if codex_actions and args.codex_verdict and args.codex_review:
         for action in codex_actions:
@@ -8111,7 +8120,7 @@ def workflow_finalize_command(args: argparse.Namespace) -> int:
                 and not item.get("deployment_ready")
             ):
                 print(
-                    "- mm-review attest-commit --run "
+                    "- merani attest-commit --run "
                     f"{shlex.quote(str(item.get('run_dir')))} --commit HEAD"
                 )
     return 0
@@ -8783,7 +8792,7 @@ def doctor_command(args: argparse.Namespace) -> int:
             "Return exactly: # Verdict\\nPASS_CLEAN\\n\\n# Findings\\nNone.\\n\\n"
             "# Test gaps\\nNone.\\n"
         )
-        with tempfile.TemporaryDirectory(prefix="mm-review-doctor-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="merani-doctor-") as temporary:
             probe_dir = Path(temporary)
             for provider in PROVIDERS:
                 if not config[provider]["enabled"]:
@@ -10056,7 +10065,7 @@ def sensitive_scan_command(args: argparse.Namespace) -> int:
     repository = repository_metadata(repo)
     source_fingerprint = fingerprint(repo, scope, paths, path_filters)
     overlay_paths = snapshot_overlay_paths(repo, scope, paths, path_filters)
-    with tempfile.TemporaryDirectory(prefix="mm-review-scan-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="merani-scan-") as temporary:
         scan_dir = Path(temporary)
         snapshot_dir = create_snapshot(
             repo,
@@ -10657,13 +10666,13 @@ def reviewer_failure_guidance(run_dir: Path, metadata: dict[str, Any]) -> str:
         if claude_category in {"authentication", "budget_exhausted", "quota"}:
             substitution = (
                 " Or explicitly substitute a fresh read-only Codex session "
-                "against the same immutable snapshot with `mm-review resume "
+                "against the same immutable snapshot with `merani resume "
                 f"--run {run_dir} --replace-failed-claude-with-codex`; this "
                 "is same-provider-family coverage, not an external-model review."
             )
     return (
         "One or more reviewers failed. Successful reports were preserved; "
-        f"retry only the failed providers with `mm-review resume --run "
+        f"retry only the failed providers with `merani resume --run "
         f"{run_dir}` after readiness is restored."
         + substitution
     )
@@ -10895,10 +10904,10 @@ def resume_review_locked(
         raise ReviewError(
             "Cannot resume all failed reviewers because some were not eligible "
             f"for another provider attempt: {detail}. Wait for quota reset or "
-            "use `mm-review continue <workflow-id>` to inspect the safe next action."
+            "use `merani continue <workflow-id>` to inspect the safe next action."
         )
 
-    snapshot_workspace = Path(tempfile.mkdtemp(prefix="mm-review-resume-"))
+    snapshot_workspace = Path(tempfile.mkdtemp(prefix="merani-resume-"))
     snapshot_dir = snapshot_workspace / "snapshot"
     try:
         clear_ephemeral_snapshot(run_dir)
@@ -11110,7 +11119,7 @@ def run_review_command(args: argparse.Namespace) -> int:
     if args.allow_sensitive_paths or args.allow_sensitive_finding:
         raise ReviewError(
             "Direct sensitive-content overrides are no longer accepted. Run "
-            "`mm-review scan ... --approve-findings`, inspect its redacted "
+            "`merani scan ... --approve-findings`, inspect its redacted "
             "findings, then consume the one-shot exact-snapshot token with "
             "--sensitive-scan-token. Sensitive paths and external symlinks "
             "must be removed from the outgoing snapshot."
@@ -11425,7 +11434,7 @@ def run_review_command(args: argparse.Namespace) -> int:
         }
         safe_write_json(run_dir / "metadata.json", metadata)
 
-    snapshot_workspace = Path(tempfile.mkdtemp(prefix="mm-review-run-"))
+    snapshot_workspace = Path(tempfile.mkdtemp(prefix="merani-run-"))
     snapshot_dir = snapshot_workspace / "snapshot"
     scan_token_path: Path | None = None
     scan_token_value: dict[str, Any] | None = None
@@ -11538,7 +11547,7 @@ def run_review_command(args: argparse.Namespace) -> int:
                             "Warning: confirmation has limited recovery "
                             f"headroom for {reviewer.name} ({used}/{maximum} "
                             "attempts already used). Before consuming this "
-                            "attempt, consider: mm-review workflow "
+                            "attempt, consider: merani workflow "
                             f"raise-provider-attempt-limit {selected_workflow} "
                             f"--to {used + 3} --reason \"reserve confirmation "
                             "recovery headroom\"",
@@ -11667,7 +11676,7 @@ def run_review_command(args: argparse.Namespace) -> int:
                 "Review blocked because likely sensitive material is in the "
                 "private snapshot:\n"
                 + "\n".join(details)
-                + "\nNew or changed findings require `mm-review scan ... "
+                + "\nNew or changed findings require `merani scan ... "
                 "--approve-findings`; inspect the redacted findings, then "
                 "consume its one-shot exact-snapshot token. Unchanged "
                 "schema-11 approvals can be reused explicitly with "
@@ -11948,9 +11957,9 @@ def run_review_command(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mm-review",
+        prog="merani",
         description=(
-            "Run independent read-only Claude, Antigravity, and Kimi code reviews."
+            "Merani: a second code review for Codex, with a record of what was checked."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -12433,12 +12442,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Deprecated and rejected; use a one-shot token from "
-            "`mm-review scan --approve-findings`"
+            "`merani scan --approve-findings`"
         ),
     )
     run_parser.add_argument(
         "--sensitive-scan-token",
-        help="Consume one exact-fingerprint token created by `mm-review scan`",
+        help="Consume one exact-fingerprint token created by `merani scan`",
     )
     run_parser.add_argument(
         "--reuse-lineage-sensitive-approvals",

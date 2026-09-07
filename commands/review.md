@@ -1,11 +1,11 @@
 ---
-description: Run fresh Claude, Codex fallback, Antigravity, and optional Kimi reviews, record verified finding decisions, rerun after fixes, and produce a freshness-checked final gate.
+description: Get a second review, check the findings, and record the result against the reviewed code.
 argument-hint: "[uncommitted | branch <base> | commit <sha>] [with-codex | without-codex] [with-antigravity | without-antigravity] [with-kimi | without-kimi] [paths ...]"
 ---
 
-# Multi-Model Review
+# Merani
 
-Use `$multi-model-review` to complete the review-and-fix loop for the current
+Use `$merani` to complete the review-and-fix loop for the current
 repository. Do not stop after collecting reviewer reports.
 
 ## Preflight
@@ -30,8 +30,8 @@ repository. Do not stop after collecting reviewer reports.
    - When Kimi is available, it can replace Antigravity or join both reviewers
      for unusually high-risk work.
    - State explicitly which reviewers actually ran.
-5. Run `mm-review doctor` and stop if the plugin/cache or an enabled reviewer is
-   not ready. Use `mm-review doctor --live` before the first allowance-consuming run
+5. Run `merani doctor` and stop if the plugin/cache or an enabled reviewer is
+   not ready. Use `merani doctor --live` before the first allowance-consuming run
    in a session or after a provider failure.
    Inspect the reported plugin version, root, runner path, and SHA-256. During
    plugin development, invoke the intended source runner directly so a stale
@@ -39,7 +39,7 @@ repository. Do not stop after collecting reviewer reports.
    Antigravity readiness must prove authenticated model access, not only that
    `agy` exists on PATH.
    If a crashed process leaves an orphaned running artifact, verify the recorded
-   process is gone and use `mm-review recover --run <run-dir>`.
+   process is gone and use `merani recover --run <run-dir>`.
 6. Derive task-specific `--path` filters so unrelated dirty files are excluded.
    Inspect the runner's excluded-path notice and add any changed dependency the
    reviewed behavior needs.
@@ -53,7 +53,7 @@ repository. Do not stop after collecting reviewer reports.
 8. Select `--review-mode fast` only for a small, localized, low-risk change;
    use `balanced` for ordinary work and `deep` whenever a risk label applies or
    the behavior spans components. Every mode retains mandatory confirmation.
-   `mm-review recommend` may be used as a conservative advisory; explicit risk
+   `merani recommend` may be used as a conservative advisory; explicit risk
    labels always keep the recommendation at `deep`.
 9. If the target, intended behavior, or production impact is ambiguous, ask
    before proceeding.
@@ -72,7 +72,7 @@ than assuming the macOS `/usr/bin/python3` is supported.
 
 ## Commands
 
-1. Run `mm-review workflow start --review-mode <fast|balanced|deep>
+1. Run `merani workflow start --review-mode <fast|balanced|deep>
    --max-provider-attempts <count>`, then run
    `--phase repair` in each affected
    repository with the same workflow ID, explicit `--path` filters, task
@@ -80,7 +80,7 @@ than assuming the macOS `/usr/bin/python3` is supported.
    `--critical-invariant ID=TEXT` claims, and any provider override. Round
    numbering is automatic.
    If secret screening reports intentional test material, inspect it using
-   `mm-review scan` with the same scope and paths, then use its one-shot token.
+   `merani scan` with the same scope and paths, then use its one-shot token.
    The scan covers and fingerprints the complete outgoing repository snapshot,
    including unchanged tracked files; direct IDs and broad overrides are not
    accepted.
@@ -88,7 +88,7 @@ than assuming the macOS `/usr/bin/python3` is supported.
    exact schema-11 content-hash matches; new or changed findings need a new
    one-shot token.
 2. Read every reviewer report completely.
-   If a run is `partial`, keep the source unchanged and use `mm-review resume`
+   If a run is `partial`, keep the source unchanged and use `merani resume`
    so only failed reviewers are retried. If Claude reached its native
    API-equivalent stop, pass
    a larger one-resume `--claude-max-budget-usd` and/or lower
@@ -105,10 +105,10 @@ than assuming the macOS `/usr/bin/python3` is supported.
    not proof of subscription billing.
 3. Independently trace every finding, test gap, and structured observation
    against the actual code path.
-   Record every result with `mm-review decide` or one atomic
-   `mm-review decide-batch`; model agreement alone is not evidence.
+   Record every result with `merani decide` or one atomic
+   `merani decide-batch`; model agreement alone is not evidence.
    For every pinned claim, treat reviewer criterion coverage as advisory and
-   attach Codex's concrete source-bound evidence with `mm-review assure`.
+   attach Codex's concrete source-bound evidence with `merani assure`.
    Critical invariants must be verified. A deferred non-critical criterion
    remains visible and limits the final gate to `PASS_WITH_FINDINGS`.
 4. Fix only accepted findings, keeping changes surgical.
@@ -145,9 +145,9 @@ than assuming the macOS `/usr/bin/python3` is supported.
    historical recommendation or restore an audited recovery attempt before
    invoking a provider. The same rule applies to an underfunded final
    confirmation attempt; the runner enforces both before allowance is consumed.
-8. Use `mm-review continue <workflow-id>` for a read-only next-action plan.
+8. Use `merani continue <workflow-id>` for a read-only next-action plan.
    Add `--execute-review` only when provider allowance may be consumed. Use
-   `mm-review gate <workflow-id>` to consolidate Codex finalization,
+   `merani gate <workflow-id>` to consolidate Codex finalization,
    verification, optional commit attestation, and workflow closure.
 
 Never allow an external reviewer to edit the working tree. Do not commit, push,
@@ -161,11 +161,11 @@ Before finishing:
 - verify the relevant checks pass, or state exact failures and test gaps;
 - inspect the final diff for correctness, scope, secrets, and unintended files;
 - perform the final Codex review;
-- run `mm-review gate <workflow-id>` after confirmation triage and Codex's
+- run `merani gate <workflow-id>` after confirmation triage and Codex's
   evidence-backed final review; the equivalent manual sequence remains
   `finalize`, `verify`, then `workflow finalize`;
 - if a reviewed working tree is later committed with user authorization, run
-  `mm-review attest-commit --run <run-dir> --commit HEAD` and verify again.
+  `merani attest-commit --run <run-dir> --commit HEAD` and verify again.
 - distinguish a fresh local `ready` gate from `deployment_ready`; neither state
   proves live runtime or external-side-effect success without separate evidence.
 - when the user explicitly authorizes commit and push, generate a concise

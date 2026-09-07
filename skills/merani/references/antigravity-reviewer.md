@@ -30,7 +30,7 @@ when the probe fails.
 The adapter runs a fresh non-interactive session with:
 
 ```text
-agy --agent codex-multi-model-review-read-only-v1 \
+agy --agent merani-read-only-v1 \
   --mode plan --sandbox --output-format json \
   --add-dir <provider-specific-input-directory> --print <review-prompt>
 ```
@@ -42,7 +42,7 @@ is never granted to the reviewer.
 Install the bundled custom agent once:
 
 ```bash
-mm-review install-antigravity-agent
+merani install-antigravity-agent
 ```
 
 It is stored under Antigravity's global custom-agent directory but remains

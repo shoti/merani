@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Rename the project, plugin, skill, and command to Merani. See
+  [upgrade notes](docs/upgrading.md) for installation and compatibility details.
+- Shorten the README and public descriptions; state the review and evidence limits
+  directly. Preserve existing configuration, review history, and legacy environment overrides.
+
 - Require structured required-check results for a passing final. Failed, unrun
   and missing checks block readiness even with passing review verdicts, including
   pre-existing suite failures. Verification prose remains supplemental evidence.
@@ -11,8 +16,6 @@
 
 All notable user-visible changes are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
-
-## Unreleased
 
 ### Fixed
 

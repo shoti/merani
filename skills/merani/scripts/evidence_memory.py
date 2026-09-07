@@ -1,4 +1,4 @@
-"""Private, rebuildable evidence memory for multi-model-review artifacts."""
+"""Private, rebuildable evidence memory for merani artifacts."""
 
 from __future__ import annotations
 

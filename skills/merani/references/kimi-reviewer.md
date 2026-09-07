@@ -1,5 +1,5 @@
 ---
-name: multi-model-reviewer
+name: merani-reviewer
 description: Read-only independent reviewer for a supplied code change
 whenToUse: Review a patch and connected repository code without modifying files
 override: false

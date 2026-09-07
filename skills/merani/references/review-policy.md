@@ -33,7 +33,7 @@ Action:
 Verification:
 ```
 
-Persist that record with `mm-review decide` or `decide-batch`; do not leave the
+Persist that record with `merani decide` or `decide-batch`; do not leave the
 only triage copy in chat. The runner locks concurrent decisions so one update
 cannot overwrite another. Every parsed finding and test gap must have a
 disposition before another round or finalization.
@@ -159,8 +159,8 @@ also carry across superseded task-lineage ancestors until a later matching
 decision resolves the same kind and title. The final gate hashes this complete
 triage set; changing any contributing decision makes the gate stale.
 
-`mm-review verify` must confirm the final gate is fresh. Every task must also
-run `mm-review workflow finalize` to close the workflow after confirming the
+`merani verify` must confirm the final gate is fresh. Every task must also
+run `merani workflow finalize` to close the workflow after confirming the
 latest round in each repository and the complete triage history.
 Final artifacts created before the structured Codex verdict contract are
 untrusted even if their stored status says PASS. Verification, workflow status,
@@ -175,7 +175,7 @@ gate. All supplemental siblings share the parent task lineage's provider
 attempts and active reservations.
 
 Committing an unchanged reviewed working tree is a state transition, not a code
-change. Use `mm-review attest-commit` to bind the final gate to the checked-out
+change. Use `merani attest-commit` to bind the final gate to the checked-out
 equivalent commit. The command must reject changed scoped content.
 
 At the three-repair limit, proceed to confirmation only if no further source
