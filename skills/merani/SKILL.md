@@ -1,9 +1,9 @@
 ---
-name: multi-model-review
-description: Run a gated code-review loop in which Codex remains the implementer and final verifier while Claude Code, a fresh Codex subprocess fallback, Antigravity CLI using Gemini models, and optional Kimi Code review a Git working tree, branch, or commit with read-only tools. Use after non-trivial implementation work, before merge or deployment, when the user requests Claude/Codex/Antigravity/Gemini/Kimi/external/second-opinion/final review, when findings from another coding agent need verification and fixes, or for an explicitly authorized post-review commit, push, or GitHub pull-request handoff.
+name: merani
+description: Get a second code review for Codex, verify findings, and keep decisions tied to the reviewed code. Use for consequential changes, requested second opinions, and final review before an authorized handoff.
 ---
 
-# Multi-Model Review
+# Merani
 
 Keep reviewer output advisory. Codex owns the implementation, verifies every
 finding, and makes the final decision. Reviewer sessions are always fresh and
@@ -31,8 +31,8 @@ The runner requires Python 3.12 or newer. Resolve and verify the interpreter
 before the first command; on macOS, `/usr/bin/python3` may still be Python 3.9.
 An unsupported interpreter is rejected before workflow or provider activity.
 
-Invoke the workflow with `/multi-model-review:multi-review`, or mention
-`$multi-model-review` in a prompt. The slash command accepts `uncommitted`,
+Invoke the workflow with `/merani:review`, or mention
+`$merani` in a prompt. The slash command accepts `uncommitted`,
 `branch <base>`, or `commit <sha>`, plus `with-codex`, `without-codex`,
 `with-antigravity`, `without-antigravity`, `with-kimi`, or `without-kimi`. The
 former Gemini option names remain accepted as compatibility aliases.
@@ -44,7 +44,7 @@ former Gemini option names remain accepted as compatibility aliases.
 2. Start one workflow ID for the entire user task:
 
 ```bash
-mm-review workflow start --name "<task>" \
+merani workflow start --name "<task>" \
   --review-mode <fast|balanced|deep> --max-provider-attempts 6
 ```
 
@@ -54,7 +54,7 @@ ordinary features and fixes; it permits two medium-effort repairs. Use `deep`
 for auth, money, trading, database writes, migrations, email, security, or
 broad cross-component changes; it retains the three-repair ceiling. Every mode
 still requires a fresh confirmation round. The default is `balanced`.
-Use `mm-review recommend` when the changed-path risk is unclear; its result is
+Use `merani recommend` when the changed-path risk is unclear; its result is
 advisory and any explicit risk label still recommends `deep`.
 New workflows treat subscription allowance, provider attempts, quota cooldowns,
 and token telemetry as the scarce resources. They do not enforce a cumulative
@@ -64,7 +64,7 @@ When historical exhaustion or an unfamiliar patch size makes Claude's native
 per-call stop uncertain, inspect local evidence before starting:
 
 ```bash
-mm-review budget-estimate --uncommitted \
+merani budget-estimate --uncommitted \
   --review-mode <fast|balanced|deep> --claude-effort <effort>
 ```
 
@@ -86,7 +86,7 @@ expose it.
    clones when the working tree contains unrelated changes:
 
 ```bash
-mm-review run --uncommitted \
+merani run --uncommitted \
   --workflow-id <workflow-id> --phase repair \
   --path src/feature --path test/feature \
   --risk db-write --review-profile data-change \
@@ -111,7 +111,7 @@ An unchanged tracked file with a recognized sensitive name, such as `.npmrc`,
 may remain in the original repository while being omitted from provider data:
 
 ```bash
-mm-review run ... --exclude-snapshot-path .npmrc
+merani run ... --exclude-snapshot-path .npmrc
 ```
 
 The runner accepts only an exact regular tracked file that is clean against
@@ -125,9 +125,9 @@ If secret screening blocks intentional test material, inspect it with the same
 scope and paths before invoking a provider:
 
 ```bash
-mm-review scan --repo <repo> --uncommitted \
+merani scan --repo <repo> --uncommitted \
   --path src/feature --path test/feature --approve-findings
-mm-review run ... --sensitive-scan-token <returned-token>
+merani run ... --sensitive-scan-token <returned-token>
 ```
 
 The initial approval is one-shot and bound to the exact repository, paths, findings,
@@ -144,7 +144,7 @@ changed finding still requires a new one-shot scan token.
    gap through the real runtime or side-effect path. Record every disposition:
 
 ```bash
-mm-review decide --run <run-dir> --finding claude-001 \
+merani decide --run <run-dir> --finding claude-001 \
   --decision accepted \
   --evidence "<repository evidence>" \
   --action "<smallest fix>" \
@@ -176,7 +176,7 @@ Multiple decisions may run concurrently because the runner locks the complete
 triage transaction. Prefer one atomic batch when decisions are already known:
 
 ```bash
-mm-review decide-batch --run <run-dir> \
+merani decide-batch --run <run-dir> \
   --item '{"finding":"claude-001","decision":"rejected","evidence":"..."}' \
   --item '{"finding":"claude-test-001","decision":"covered","evidence":"..."}'
 ```
@@ -187,7 +187,7 @@ its own concrete repository, test, artifact, or safe runtime evidence to each
 claim on the final fresh run:
 
 ```bash
-mm-review assure --run <run-dir> --claim RESULT-1 \
+merani assure --run <run-dir> --claim RESULT-1 \
   --status verified --evidence-kind test \
   --evidence "tests/feature_test.py::test_result passes"
 ```
@@ -197,7 +197,7 @@ uses the same fields and validation rules as `assure`; one invalid item leaves
 both assurance artifacts unchanged:
 
 ```bash
-mm-review assure-batch --run <run-dir> \
+merani assure-batch --run <run-dir> \
   --item '{"claim":"RESULT-1","status":"verified","evidence_kind":"test","evidence":"tests/feature_test.py::test_result passes"}' \
   --item '{"claim":"RESULT-2","status":"deferred","evidence_kind":"artifact","evidence":"artifact.json records the gap","rationale":"Deferred intentionally"}'
 ```
@@ -230,7 +230,7 @@ If one reviewer fails after another returns a valid report, the run becomes
 not invoked again:
 
 ```bash
-mm-review resume --run <partial-run-dir>
+merani resume --run <partial-run-dir>
 ```
 
 Resume fails closed if the source fingerprint changed or a later completed
@@ -244,7 +244,7 @@ repeat the same cap or lower both effort and the stop.
 Resume the unchanged snapshot with an explicit one-attempt override:
 
 ```bash
-mm-review resume --run <partial-run-dir> \
+merani resume --run <partial-run-dir> \
   --claude-max-budget-usd 2 --claude-effort medium
 ```
 
@@ -253,7 +253,7 @@ the user may explicitly replace only that failed attempt with a fresh Codex
 session against the same fingerprint-bound snapshot:
 
 ```bash
-mm-review resume --run <partial-run-dir> \
+merani resume --run <partial-run-dir> \
   --replace-failed-claude-with-codex
 ```
 
@@ -271,7 +271,7 @@ through `workflow supersede --by` must have the exact same provider-usage policy
    round:
 
 ```bash
-mm-review run --workflow-id <workflow-id> \
+merani run --workflow-id <workflow-id> \
   --phase confirmation --reuse-contract \
   --reuse-lineage-sensitive-approvals
 ```
@@ -291,7 +291,7 @@ If the deliberate original ceiling is too tight, increase it explicitly and
 auditably; it can never be lowered by this command:
 
 ```bash
-mm-review workflow raise-provider-attempt-limit <workflow-id> --to <count> \
+merani workflow raise-provider-attempt-limit <workflow-id> --to <count> \
   --reason "reserve confirmation recovery headroom"
 ```
 
@@ -299,7 +299,7 @@ Use the usage-aware continuation helper whenever the next lifecycle step is
 unclear:
 
 ```bash
-mm-review continue <workflow-id>
+merani continue <workflow-id>
 ```
 
 It is read-only by default and returns the next exact action: initial review,
@@ -312,7 +312,7 @@ names only providers that actually returned successful review evidence. To
 authorize one available provider-review step:
 
 ```bash
-mm-review continue <workflow-id> --execute-review
+merani continue <workflow-id> --execute-review
 ```
 
 Persistent `provider_use_policy=auto` makes the plain command execute one safe
@@ -322,19 +322,19 @@ final verdict.
 8. Triage the confirmation, perform Codex's final diff review, and finalize it:
 
 ```bash
-mm-review finalize --run <run-dir> \
+merani finalize --run <run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
   --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<final review result>" \
   --verification "<command/check: result>"
-mm-review verify --run <run-dir>
+merani verify --run <run-dir>
 ```
 
 The consolidated gate can perform the same finalization, verification, optional
 checked-out-HEAD attestation, and workflow closure:
 
 ```bash
-mm-review gate <workflow-id> \
+merani gate <workflow-id> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
   --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<evidence-backed final review>" \
@@ -374,7 +374,7 @@ finalization fails closed. Run another independent review, or inspect every
 named path and limitation yourself and persist concrete compensation:
 
 ```bash
-mm-review finalize --run <run-dir> \
+merani finalize --run <run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
   --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<final review result>" \
@@ -406,7 +406,7 @@ If finalized confirmation later becomes stale because scoped source changes,
 successor command. A completed confirmation intentionally closes its workflow:
 
 ```bash
-mm-review workflow supersede <workflow-id> --reason "<contract or source change>"
+merani workflow supersede <workflow-id> --reason "<contract or source change>"
 ```
 
 The successor inherits every repository represented in the superseded lineage.
@@ -418,7 +418,7 @@ Close every workflow after all repositories pass, including single-repository
 tasks:
 
 ```bash
-mm-review workflow finalize <workflow-id>
+merani workflow finalize <workflow-id>
 ```
 
 `workflow status` and the read-only `workflow audit` distinguish active work,
@@ -439,13 +439,13 @@ question, use one supplemental review instead of another repair/confirmation
 pair:
 
 ```bash
-mm-review run --supplemental-of <finalized-run-dir> \
+merani run --supplemental-of <finalized-run-dir> \
   --task "<focused additional concern>"
-mm-review finalize --run <supplemental-run-dir> \
+merani finalize --run <supplemental-run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
   --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<focused Codex verification>"
-mm-review verify --run <supplemental-run-dir>
+merani verify --run <supplemental-run-dir>
 ```
 
 The runner verifies exact content equivalence and writes `supplemental.json`.
@@ -461,8 +461,8 @@ If the user later authorizes a commit, bind the reviewed snapshot to it without
 rerunning unchanged code:
 
 ```bash
-mm-review attest-commit --run <run-dir> --commit HEAD
-mm-review verify --run <run-dir>
+merani attest-commit --run <run-dir> --commit HEAD
+merani verify --run <run-dir>
 ```
 
 The runner proves the checked-out commit is task-scope content-equivalent to the
@@ -540,34 +540,34 @@ retries. Use the
 bundled runner so the plugin remains self-contained:
 
 ```bash
-python3 <skill-dir>/scripts/mm_review.py status
-python3 <skill-dir>/scripts/mm_review.py doctor
-python3 <skill-dir>/scripts/mm_review.py doctor --live
-python3 <skill-dir>/scripts/mm_review.py recover --run <orphaned-run-dir>
-python3 <skill-dir>/scripts/mm_review.py set-effort medium
-python3 <skill-dir>/scripts/mm_review.py set-claude-usage-limit 1.25
-python3 <skill-dir>/scripts/mm_review.py set-provider-attempt-limit 6
-python3 <skill-dir>/scripts/mm_review.py set-provider-use-policy explicit
-python3 <skill-dir>/scripts/mm_review.py enable codex
-python3 <skill-dir>/scripts/mm_review.py disable codex
-python3 <skill-dir>/scripts/mm_review.py continue <workflow-id>
-python3 <skill-dir>/scripts/mm_review.py gate <workflow-id>
-python3 <skill-dir>/scripts/mm_review.py analytics --since-days 30 --format compact
-python3 <skill-dir>/scripts/mm_review.py budget-estimate --uncommitted --review-mode balanced
-python3 <skill-dir>/scripts/mm_review.py workflow audit --stale-days 7 --format compact
-python3 <skill-dir>/scripts/mm_review.py recommend --uncommitted --risk security
-python3 <skill-dir>/scripts/mm_review.py memory rebuild
-python3 <skill-dir>/scripts/mm_review.py memory search "repeated timeout finding" --format compact
-python3 <skill-dir>/scripts/mm_review.py memory compact
-python3 <skill-dir>/scripts/mm_review.py install-antigravity-agent
-python3 <skill-dir>/scripts/mm_review.py enable antigravity
-python3 <skill-dir>/scripts/mm_review.py disable antigravity
-python3 <skill-dir>/scripts/mm_review.py disable antigravity --lock
-python3 <skill-dir>/scripts/mm_review.py set-model antigravity auto
-python3 <skill-dir>/scripts/mm_review.py enable kimi
-python3 <skill-dir>/scripts/mm_review.py disable kimi
-python3 <skill-dir>/scripts/mm_review.py set-model kimi k3-256k
-python3 <skill-dir>/scripts/mm_review.py set-model kimi k3
+python3 <skill-dir>/scripts/merani.py status
+python3 <skill-dir>/scripts/merani.py doctor
+python3 <skill-dir>/scripts/merani.py doctor --live
+python3 <skill-dir>/scripts/merani.py recover --run <orphaned-run-dir>
+python3 <skill-dir>/scripts/merani.py set-effort medium
+python3 <skill-dir>/scripts/merani.py set-claude-usage-limit 1.25
+python3 <skill-dir>/scripts/merani.py set-provider-attempt-limit 6
+python3 <skill-dir>/scripts/merani.py set-provider-use-policy explicit
+python3 <skill-dir>/scripts/merani.py enable codex
+python3 <skill-dir>/scripts/merani.py disable codex
+python3 <skill-dir>/scripts/merani.py continue <workflow-id>
+python3 <skill-dir>/scripts/merani.py gate <workflow-id>
+python3 <skill-dir>/scripts/merani.py analytics --since-days 30 --format compact
+python3 <skill-dir>/scripts/merani.py budget-estimate --uncommitted --review-mode balanced
+python3 <skill-dir>/scripts/merani.py workflow audit --stale-days 7 --format compact
+python3 <skill-dir>/scripts/merani.py recommend --uncommitted --risk security
+python3 <skill-dir>/scripts/merani.py memory rebuild
+python3 <skill-dir>/scripts/merani.py memory search "repeated timeout finding" --format compact
+python3 <skill-dir>/scripts/merani.py memory compact
+python3 <skill-dir>/scripts/merani.py install-antigravity-agent
+python3 <skill-dir>/scripts/merani.py enable antigravity
+python3 <skill-dir>/scripts/merani.py disable antigravity
+python3 <skill-dir>/scripts/merani.py disable antigravity --lock
+python3 <skill-dir>/scripts/merani.py set-model antigravity auto
+python3 <skill-dir>/scripts/merani.py enable kimi
+python3 <skill-dir>/scripts/merani.py disable kimi
+python3 <skill-dir>/scripts/merani.py set-model kimi k3-256k
+python3 <skill-dir>/scripts/merani.py set-model kimi k3
 ```
 
 `set-effort` and `set-claude-usage-limit` change persistent defaults. Prefer
@@ -609,7 +609,7 @@ join both reviewers for unusually high-risk work.
 Prefer `k3-256k` for routine Kimi reviews and `k3` when the relevant context
 cannot fit within 256K. State explicitly which reviewers actually ran.
 
-When the optional `mm-review` PATH shortcut exists, it is equivalent to the
+When the optional `merani` PATH shortcut exists, it is equivalent to the
 bundled Python command. Run `doctor` before the first review in a session when
 CLI availability or model configuration is uncertain. It checks plugin/cache
 parity, private storage modes, CLI flags, and static readiness; `doctor --live`
@@ -619,7 +619,7 @@ Artifacts persist the same identity. During local plugin development, invoke
 the intended source runner directly; a cached runner can prove parity only for
 the bundle it belongs to, not that a separate source checkout is newer.
 If the host Codex sandbox cannot write the default `~/.codex/review-runs`
-artifact store, set `MM_REVIEW_RUNS_DIR` to an absolute private writable
+artifact store, set `MERANI_RUNS_DIR` to an absolute private writable
 directory for the complete workflow; do not alternate stores within a lineage.
 Interrupted reviews terminate their child process groups and are marked failed.
 If a crash leaves running metadata whose recorded PID is no longer alive, use
@@ -627,7 +627,7 @@ If a crash leaves running metadata whose recorded PID is no longer alive, use
 Antigravity reports ready only when the CLI is installed, authenticated,
 reachable, has at least one available model, and the hard read-only custom
 agent matches the bundled definition. Run `agy` to authenticate or
-`mm-review install-antigravity-agent` to repair the agent when readiness fails.
+`merani install-antigravity-agent` to repair the agent when readiness fails.
 Kimi readiness calls `kimi provider list --json` and verifies that the selected
 model alias is actually configured before any provider allowance is consumed.
 

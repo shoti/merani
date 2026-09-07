@@ -34,4 +34,6 @@ service-account*.json
 # Local review artifacts
 .codex/review-runs/
 review-runs/
+.config/merani/
+# Legacy configuration retained for existing installations
 .config/multi-model-review/

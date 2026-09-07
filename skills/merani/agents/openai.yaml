@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merani"
+  short_description: "A second code review, with a record"
+  default_prompt: "Use $merani to review my changes, verify the findings, and complete the final review."

@@ -35,21 +35,21 @@ jobs:
       - name: Compile runner
         run: >-
           python -m py_compile
-          skills/multi-model-review/scripts/mm_review.py
-          skills/multi-model-review/scripts/assurance.py
-          skills/multi-model-review/scripts/review_contract.py
-          skills/multi-model-review/scripts/evidence_memory.py
-          skills/multi-model-review/scripts/review_metrics.py
+          skills/merani/scripts/merani.py
+          skills/merani/scripts/assurance.py
+          skills/merani/scripts/review_contract.py
+          skills/merani/scripts/evidence_memory.py
+          skills/merani/scripts/review_metrics.py
 
       - name: Validate JSON
         run: |
           python -m json.tool .codex-plugin/plugin.json >/dev/null
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
-          for file in skills/multi-model-review/scripts/fixtures/*.json; do
+          for file in skills/merani/scripts/fixtures/*.json; do
             python -m json.tool "$file" >/dev/null
           done
 
       - name: Run tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python skills/multi-model-review/scripts/test_mm_review.py
+        run: python skills/merani/scripts/test_merani.py

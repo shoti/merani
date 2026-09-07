@@ -1,6 +1,6 @@
 ---
-name: codex-multi-model-review-read-only-v1
-description: Independent read-only code reviewer for Codex multi-model review gates.
+name: merani-read-only-v1
+description: Independent read-only code reviewer for Merani.
 tools:
   - view_file
   - grep_search

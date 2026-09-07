@@ -7,11 +7,11 @@ small, auditable, and compatible with Python 3.12 or newer on Linux and macOS.
 
 - `.codex-plugin/plugin.json`: plugin identity and install-surface metadata.
 - `.agents/plugins/marketplace.json`: repository marketplace entry.
-- `skills/multi-model-review/SKILL.md`: the user-facing workflow contract.
-- `skills/multi-model-review/scripts/mm_review.py`: the runner.
-- `skills/multi-model-review/scripts/test_mm_review.py`: the dependency-free
+- `skills/merani/SKILL.md`: the user-facing workflow contract.
+- `skills/merani/scripts/merani.py`: the runner.
+- `skills/merani/scripts/test_merani.py`: the dependency-free
   test suite.
-- `skills/multi-model-review/references/`: reviewer and policy contracts.
+- `skills/merani/references/`: reviewer and policy contracts.
 
 ## Change rules
 
@@ -36,11 +36,11 @@ Run:
 
 ```bash
 python3 -m py_compile \
-  skills/multi-model-review/scripts/mm_review.py \
-  skills/multi-model-review/scripts/review_contract.py \
-  skills/multi-model-review/scripts/evidence_memory.py \
-  skills/multi-model-review/scripts/review_metrics.py
-python3 skills/multi-model-review/scripts/test_mm_review.py
+  skills/merani/scripts/merani.py \
+  skills/merani/scripts/review_contract.py \
+  skills/merani/scripts/evidence_memory.py \
+  skills/merani/scripts/review_metrics.py
+python3 skills/merani/scripts/test_merani.py
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 git diff --check

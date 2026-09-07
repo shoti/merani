@@ -1,11 +1,11 @@
 {
-  "name": "codex-multi-model-review",
+  "name": "merani",
   "interface": {
-    "displayName": "Codex Multi-Model Review"
+    "displayName": "Merani"
   },
   "plugins": [
     {
-      "name": "multi-model-review",
+      "name": "merani",
       "source": {
         "source": "local",
         "path": "./"

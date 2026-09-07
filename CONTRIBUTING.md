@@ -1,64 +1,45 @@
-# Contributing
+# Contributing to Merani
 
-Thanks for improving Multi-Model Review. Small, focused pull requests are the
-easiest to verify and review.
+Small, focused pull requests are easiest to review. Explain the problem and
+what changes for the user. Discuss new runtime dependencies before adding them.
 
-## Development setup
+## Local checks
 
-The runner uses only the Python standard library. You need:
-
-- Git;
-- Python 3.12 or newer;
-- Linux or macOS.
-
-Claude Code, Antigravity, and Kimi Code are optional for development. The test
-suite replaces them with local fake executables and never spends provider
-credits.
-
-Clone the repository and run the checks:
+Use Python 3.12+ and Git on macOS or Linux. No model accounts are needed for
+tests: the suite uses fake reviewer CLIs and does not spend provider credits.
 
 ```bash
-git clone https://github.com/shoti/codex-multi-model-review.git
-cd codex-multi-model-review
-python3 -m py_compile \
-  skills/multi-model-review/scripts/mm_review.py \
-  skills/multi-model-review/scripts/review_contract.py
-python3 skills/multi-model-review/scripts/test_mm_review.py
+git clone https://github.com/shoti/merani.git
+cd merani
+python3 -m py_compile skills/merani/scripts/*.py
+python3 skills/merani/scripts/test_merani.py
+python3 -m json.tool .codex-plugin/plugin.json >/dev/null
+python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 git diff --check
 ```
 
-## Pull requests
+For local installation:
 
-Before opening a pull request:
+```bash
+codex plugin marketplace add "$PWD"
+codex plugin add merani@merani
+```
 
-1. Explain the user-visible problem and the intended behavior.
-2. Add or update a focused regression test for behavior changes.
-3. Keep external reviewer tools read-only and keep paid calls out of tests.
-4. Update the skill and README when a command or workflow contract changes.
-5. Check the diff for secrets, credentials, private paths, and generated files.
-6. List the exact verification commands and results in the pull request.
+After changing an installed bundle, give its version a fresh `+codex.<timestamp>`
+suffix, reinstall, and start a new thread. Run the checks against the installed
+copy too. Live provider tests are optional and must be explicitly requested.
 
-Please avoid unrelated refactors or formatting churn. New runtime dependencies
-need discussion in an issue before implementation.
+## Keep these properties
 
-## Architecture invariants
+- Codex verifies findings and owns the final decision; reviewers stay read-only.
+- Reviewers inspect fixed snapshots with explicit scope and secret screening.
+- Findings and test gaps receive recorded decisions.
+- Repair rounds are bounded and followed by a fresh confirmation review.
+- Changed source invalidates a passing result.
+- Provider attempts stay bounded across retries and successor workflows.
 
-The following are deliberate safety properties:
+Add regression tests for behavior changes, update affected command documentation,
+and report what you tested. Keep unrelated refactors out of the same PR.
+Do not commit credentials, private review artifacts, or generated caches.
 
-- Codex owns implementation, verification, and the final decision.
-- Reviewers inspect immutable repository snapshots under task-scoped contracts
-  with read-only tools.
-- Every finding and test gap receives a persisted disposition.
-- Repair rounds are bounded and followed by a mandatory confirmation.
-- Source fingerprints make stale final gates fail closed.
-- Credentials and likely secret material are blocked before provider review.
-- Claude reviews have both per-call and cumulative task-lineage spend caps; other
-  providers are opt-in.
-
-Changes that weaken an invariant need explicit rationale, tests, and a migration
-story for existing review artifacts.
-
-## Reporting security issues
-
-Do not publish exploitable details in a normal issue. Follow
-[SECURITY.md](SECURITY.md) instead.
+Report vulnerabilities through [SECURITY.md](SECURITY.md).

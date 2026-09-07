@@ -22,8 +22,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 
-SCRIPT_PATH = Path(__file__).with_name("mm_review.py")
-SPEC = importlib.util.spec_from_file_location("mm_review", SCRIPT_PATH)
+SCRIPT_PATH = Path(__file__).with_name("merani.py")
+SPEC = importlib.util.spec_from_file_location("merani", SCRIPT_PATH)
 assert SPEC and SPEC.loader
 MM = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MM
@@ -286,7 +286,7 @@ class FakeProviderHarness:
                     "workspace_files": workspace_files,
                     "mutate_relative": mutation,
                     "sentinel_secret_present": (
-                        "MM_REVIEW_SENTINEL_SECRET" in os.environ
+                        "MERANI_SENTINEL_SECRET" in os.environ
                     ),
                     "codex_home": str(fake_root) if provider == "codex" else None,
                     "codex_auth_present": (
@@ -1733,7 +1733,7 @@ class RunnerUnitTests(unittest.TestCase):
             {
                 "PATH": "/test/bin",
                 "HOME": "/test/home",
-                "MM_REVIEW_SENTINEL_SECRET": "do-not-inherit",
+                "MERANI_SENTINEL_SECRET": "do-not-inherit",
             },
             clear=True,
         ):
@@ -1741,7 +1741,7 @@ class RunnerUnitTests(unittest.TestCase):
 
         self.assertEqual(environment["PATH"], "/test/bin")
         self.assertEqual(environment["HOME"], "/test/home")
-        self.assertNotIn("MM_REVIEW_SENTINEL_SECRET", environment)
+        self.assertNotIn("MERANI_SENTINEL_SECRET", environment)
 
     def test_codex_review_profile_denies_host_and_allows_only_roots(self) -> None:
         roots = (Path("/private/review/snapshot"), Path("/private/review/input"))
@@ -2048,7 +2048,7 @@ class RunnerUnitTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     MM.ReviewError,
-                    "MM_REVIEW_RUNS_DIR.*approve access",
+                    "MERANI_RUNS_DIR.*approve access",
                 ),
             ):
                 MM.safe_write_json(target, {"ok": True})
@@ -2066,7 +2066,7 @@ class RunnerUnitTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     MM.ReviewError,
-                    "MM_REVIEW_CONFIG_DIR.*approve access",
+                    "MERANI_CONFIG_DIR.*approve access",
                 ),
             ):
                 MM.safe_write_json(target, {"ok": True})
@@ -2084,7 +2084,7 @@ class RunnerUnitTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     MM.ReviewError,
-                    "MM_REVIEW_RUNS_DIR.*approve access",
+                    "MERANI_RUNS_DIR.*approve access",
                 ),
             ):
                 MM.safe_write(target, "review prompt")
@@ -2107,13 +2107,13 @@ class RunnerUnitTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     MM.ReviewError,
-                    "replace denied.*MM_REVIEW_RUNS_DIR",
+                    "replace denied.*MERANI_RUNS_DIR",
                 ),
             ):
                 MM.safe_write_json(target, {"ok": True})
 
     def test_relative_state_directory_overrides_are_rejected(self) -> None:
-        for variable in ("MM_REVIEW_RUNS_DIR", "MM_REVIEW_CONFIG_DIR"):
+        for variable in ("MERANI_RUNS_DIR", "MERANI_CONFIG_DIR"):
             with self.subTest(variable=variable), mock.patch.dict(
                 os.environ,
                 {variable: "relative/review-state"},
@@ -2123,6 +2123,57 @@ class RunnerUnitTests(unittest.TestCase):
                 rf"{variable} must be an absolute path",
             ):
                 MM.state_dir_from_environment(variable, Path("/unused"))
+
+    def test_rebrand_preserves_settings_and_environment_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            legacy = home / ".config" / "multi-model-review"
+            modern = home / ".config" / "merani"
+            probe = (
+                "import json,sys; "
+                f"sys.path.insert(0, {str(SCRIPT_PATH.parent)!r}); "
+                "import merani; "
+                "print(json.dumps([str(merani.CONFIG_DIR), str(merani.RUNS_DIR)]))"
+            )
+
+            def directories(overrides: dict[str, str]) -> list[str]:
+                environment = {
+                    "HOME": str(home), "PATH": os.defpath,
+                    "PYTHONDONTWRITEBYTECODE": "1", **overrides,
+                }
+                result = subprocess.run(
+                    [sys.executable, "-c", probe], env=environment,
+                    capture_output=True, text=True, check=True,
+                )
+                return json.loads(result.stdout)
+
+            runs = home / ".codex" / "review-runs"
+            self.assertEqual(directories({}), [str(modern.resolve()), str(runs.resolve())])
+            legacy.mkdir(parents=True)
+            (legacy / "config.json").write_text('{"claude":{"enabled":false}}')
+            before = (legacy / "config.json").read_bytes()
+            self.assertEqual(directories({}), [str(legacy.resolve()), str(runs.resolve())])
+            # Creating the new directory must not silently discard old preferences.
+            modern.mkdir()
+            self.assertEqual(directories({})[0], str(legacy.resolve()))
+            old = {
+                "MM_REVIEW_CONFIG_DIR": str(home / "old-config"),
+                "MM_REVIEW_RUNS_DIR": str(home / "old-runs"),
+            }
+            self.assertEqual(directories(old), [str(Path(p).resolve()) for p in old.values()])
+            new = {
+                "MERANI_CONFIG_DIR": str(home / "new-config"),
+                "MERANI_RUNS_DIR": str(home / "new-runs"),
+            }
+            self.assertEqual(directories(old | new), [str(Path(p).resolve()) for p in new.values()])
+            self.assertEqual((legacy / "config.json").read_bytes(), before)
+
+    def test_legacy_relative_state_override_still_fails_closed(self) -> None:
+        with mock.patch.dict(os.environ, {"MM_REVIEW_RUNS_DIR": "relative"}, clear=True):
+            with self.assertRaisesRegex(MM.ReviewError, "MM_REVIEW_RUNS_DIR must be an absolute path"):
+                MM.state_dir_from_environment(
+                    "MERANI_RUNS_DIR", Path("/unused"), legacy_name="MM_REVIEW_RUNS_DIR"
+                )
 
     def test_pending_substitution_target_remains_resumable(self) -> None:
         reviewers = {
@@ -2378,7 +2429,7 @@ class RunnerUnitTests(unittest.TestCase):
             manifest_dir = plugin_root / ".codex-plugin"
             manifest_dir.mkdir(parents=True)
             manifest = {
-                "name": "multi-model-review",
+                "name": "merani",
                 "version": "0.1.0",
             }
             (manifest_dir / "plugin.json").write_text(
@@ -2391,8 +2442,8 @@ class RunnerUnitTests(unittest.TestCase):
             )
             installed = (
                 cache_root
-                / "codex-multi-model-review"
-                / "multi-model-review"
+                / "merani"
+                / "merani"
                 / "0.1.0"
             )
             installed.parent.mkdir(parents=True)
@@ -2404,7 +2455,7 @@ class RunnerUnitTests(unittest.TestCase):
             )
 
             self.assertTrue(ok)
-            self.assertIn("marketplace codex-multi-model-review", detail)
+            self.assertIn("marketplace merani", detail)
 
     def test_plugin_parity_rejects_missing_and_mismatched_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2416,7 +2467,7 @@ class RunnerUnitTests(unittest.TestCase):
             (manifest_dir / "plugin.json").write_text(
                 json.dumps(
                     {
-                        "name": "multi-model-review",
+                        "name": "merani",
                         "version": "0.1.0",
                     }
                 ),
@@ -2437,7 +2488,7 @@ class RunnerUnitTests(unittest.TestCase):
             installed = (
                 cache_root
                 / "team-marketplace"
-                / "multi-model-review"
+                / "merani"
                 / "0.1.0"
             )
             installed.mkdir(parents=True)
@@ -3081,7 +3132,7 @@ class RunnerUnitTests(unittest.TestCase):
                 plan = MM.workflow_continue_plan("wf-empty")
         self.assertEqual(plan["next"], "NEEDS_INITIAL_REVIEW")
         self.assertFalse(plan["actions"][0]["automatable"])
-        self.assertIn("mm-review run", plan["actions"][0]["command"])
+        self.assertIn("merani run", plan["actions"][0]["command"])
 
     def test_continue_requires_successor_when_confirmation_changes_before_final(
         self,
@@ -3362,7 +3413,7 @@ class RunnerUnitTests(unittest.TestCase):
                 {
                     "type": "review",
                     "automatable": True,
-                    "command": "mm-review run --workflow-id wf-test",
+                    "command": "merani run --workflow-id wf-test",
                 }
             ],
         }
@@ -3394,7 +3445,7 @@ class RunnerUnitTests(unittest.TestCase):
                 {
                     "type": "review",
                     "automatable": True,
-                    "command": "mm-review run --workflow-id wf-test",
+                    "command": "merani run --workflow-id wf-test",
                 }
             ],
         }
@@ -3437,7 +3488,7 @@ class RunnerUnitTests(unittest.TestCase):
         action = {
             "type": "review",
             "command": (
-                "mm-review run --repo /tmp/repo --workflow-id wf-test "
+                "merani run --repo /tmp/repo --workflow-id wf-test "
                 "--phase confirmation --reuse-contract"
             ),
         }
@@ -5616,7 +5667,7 @@ None.
                 installed.write_text("outdated\n", encoding="utf-8")
                 outdated = MM.antigravity_agent_readiness()
 
-            self.assertIn("name: codex-multi-model-review-read-only-v1", content)
+            self.assertIn("name: merani-read-only-v1", content)
             self.assertIn("  - view_file", content)
             self.assertIn("  - grep_search", content)
             self.assertIn("commandExecutionPolicy: off", content)
@@ -7096,7 +7147,7 @@ None.
         self.assertEqual(persisted["status"], "failed")
         self.assertEqual(persisted["failure"]["type"], "lineage_budget_exceeded")
         self.assertEqual(summary["reviews"]["kimi"]["verdict"], "PASS_CLEAN")
-        self.assertNotIn("mm-review resume", guidance)
+        self.assertNotIn("merani resume", guidance)
         self.assertIn("cannot be resumed", guidance)
         self.assertIn("fresh review round", guidance)
 
@@ -7163,7 +7214,7 @@ None.
             persisted["failure"]["protected_reservation_usd"], 1.375
         )
         self.assertIn("per-call emergency stop", guidance)
-        self.assertNotIn("mm-review resume", guidance)
+        self.assertNotIn("merani resume", guidance)
 
     def test_workflow_supersede_links_both_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -8308,7 +8359,7 @@ None.
                         "title": "Budget cap bypass",
                         "similarity": 0.75,
                         "matched_fields": ["title", "evidence"],
-                        "location": "scripts/mm_review.py:1",
+                        "location": "scripts/merani.py:1",
                         "workflow_id": "wf-one",
                         "run_id": "run-one",
                     }
@@ -10927,7 +10978,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "VALUE = 2\n", encoding="utf-8"
             )
             harness = FakeProviderHarness(root)
-            harness.environment["MM_REVIEW_SENTINEL_SECRET"] = (
+            harness.environment["MERANI_SENTINEL_SECRET"] = (
                 "synthetic-do-not-inherit"
             )
             workflow = harness.cli(
@@ -13583,7 +13634,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_claude.chmod(0o755)
-            config_dir = home / ".config" / "multi-model-review"
+            config_dir = home / ".config" / "merani"
             config_dir.mkdir(parents=True)
             (config_dir / "config.json").write_text(
                 json.dumps({"antigravity": {"enabled": False}}),
@@ -14041,7 +14092,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_kimi.chmod(0o755)
-            config_dir = home / ".config" / "multi-model-review"
+            config_dir = home / ".config" / "merani"
             config_dir.mkdir(parents=True)
             (config_dir / "config.json").write_text(
                 json.dumps(
