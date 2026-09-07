@@ -31,7 +31,9 @@ import time
 import traceback
 import uuid
 from typing import Any, Iterable, Sequence
-from validation import ValidationError, evaluate_checks, parse_check_result
+from validation import (
+    ValidationError, evaluate_checks, normalize_required_checks, parse_check_result,
+)
 
 from assurance import (
     AssuranceError,
@@ -197,7 +199,7 @@ CODEX_REVIEW_MCP_IGNORED_DIRS = {
 }
 LEGACY_PROVIDER_ALIASES = {"gemini": "antigravity"}
 PROVIDER_CHOICES = (*PROVIDERS, *LEGACY_PROVIDER_ALIASES)
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 MAX_REPAIR_ROUNDS = 3
 RUN_PHASES = ("repair", "confirmation", "supplemental")
 DEFAULT_REVIEW_MODE = "balanced"
@@ -2226,8 +2228,8 @@ For each demonstrably non-actionable observation:
 - Evidence: concrete fact that was verified
 - Why non-actionable: why it has no reachable impact and needs no code/test action
 
-Write "None." when there are no observations. Observations are audited and
-must be acknowledged by Codex, but they do not lower a clean verdict. If you
+Write "None." when there are no observations. Observations are informational;
+they do not require acknowledgment or lower a clean verdict. If you
 cannot demonstrate that an item has no reachable impact, report it as a finding.
 
 # Coverage
@@ -3857,9 +3859,13 @@ def review_binding(
     return "working_tree_only", False
 
 
-def triage_items(triage: dict[str, Any]) -> list[dict[str, Any]]:
+def triage_items(
+    triage: dict[str, Any], *, include_observations: bool = True
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for key in ("findings", "test_gaps", "observations"):
+        if key == "observations" and not include_observations:
+            continue
         value = triage.get(key, [])
         if isinstance(value, list):
             items.extend(item for item in value if isinstance(item, dict))
@@ -3868,11 +3874,9 @@ def triage_items(triage: dict[str, Any]) -> list[dict[str, Any]]:
 
 def pending_triage_ids(triage: dict[str, Any]) -> list[str]:
     pending: list[str] = []
-    for item in triage_items(triage):
+    for item in triage_items(triage, include_observations=False):
         if item.get("kind") == "test_gap":
             valid = VALID_TEST_GAP_DECISIONS
-        elif item.get("kind") == "observation":
-            valid = VALID_OBSERVATION_DECISIONS
         else:
             valid = VALID_DECISIONS
         if item.get("decision") not in valid:
@@ -4947,6 +4951,7 @@ def baseline_review_contract(
         "review_profile": baseline.get("review_profile", "normal"),
         "task": baseline.get("task"),
         "assurance_contract": baseline.get("assurance_contract"),
+        "required_checks": baseline.get("required_checks"),
         "snapshot_exclusion_paths": [
             str(item.get("path"))
             for item in baseline.get("snapshot_exclusions", [])
@@ -4986,6 +4991,7 @@ def validate_review_contract(
     review_profile: str,
     task: str | None,
     assurance_contract: dict[str, Any] | None = None,
+    required_checks: list[str] | None = None,
     snapshot_exclusion_paths: Sequence[str] = (),
 ) -> None:
     expected = baseline_review_contract(identifier, repository_id)
@@ -4998,6 +5004,7 @@ def validate_review_contract(
         "review_profile": review_profile,
         "task": task,
         "assurance_contract": assurance_contract,
+        "required_checks": required_checks,
         "snapshot_exclusion_paths": list(snapshot_exclusion_paths),
     }
     mismatches = [
@@ -6739,7 +6746,7 @@ def _workflow_audit_report(stale_days: int) -> dict[str, Any]:
                 run_final_path = run_dir / "supplemental.json"
             if run_final_path.exists():
                 run_finals += 1
-                trusted, issues = final_contract_trust(read_json(run_final_path))
+                trusted, issues = final_contract_trust(read_json(run_final_path), metadata)
                 if not trusted:
                     untrusted_finals.append(
                         {
@@ -6751,12 +6758,10 @@ def _workflow_audit_report(stale_days: int) -> dict[str, Any]:
             triage_path = run_dir / "triage.json"
             if not triage_path.exists():
                 continue
-            for item in triage_items(read_json(triage_path)):
+            for item in triage_items(read_json(triage_path), include_observations=False):
                 decision = item.get("decision")
                 if item.get("kind") == "test_gap":
                     valid = VALID_TEST_GAP_DECISIONS
-                elif item.get("kind") == "observation":
-                    valid = VALID_OBSERVATION_DECISIONS
                 else:
                     valid = VALID_DECISIONS
                 if decision not in valid or decision in {"accepted", "uncertain"}:
@@ -6983,7 +6988,7 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 else None
             )
             final_contract_trusted, final_contract_issues = final_contract_trust(
-                final
+                final, metadata
             )
             try:
                 freshness = freshness_status(
@@ -7661,7 +7666,7 @@ def workflow_continue_plan(
                             )
                     else:
                         final = read_json(final_path)
-                        trusted, trust_issues = final_contract_trust(final)
+                        trusted, trust_issues = final_contract_trust(final, metadata)
                         final_status = str(final.get("status") or "")
                         if (
                             not trusted
@@ -7751,10 +7756,6 @@ def review_next_guidance(
         isinstance(review, dict) and bool(review.get("test_gaps"))
         for review in parsed_reviews.values()
     )
-    has_observations = any(
-        isinstance(review, dict) and bool(review.get("observations"))
-        for review in parsed_reviews.values()
-    )
     has_incomplete_coverage = any(
         isinstance(review, dict)
         and isinstance(review.get("coverage"), dict)
@@ -7771,7 +7772,7 @@ def review_next_guidance(
         if needs_coverage_compensation
         else ""
     )
-    if has_findings or has_test_gaps or has_observations:
+    if has_findings or has_test_gaps:
         actions: list[str] = []
         decisions: list[str] = []
         if has_findings:
@@ -7780,8 +7781,6 @@ def review_next_guidance(
             decisions.append("every test gap")
         if decisions:
             actions.append("decide " + " and ".join(decisions))
-        if has_observations:
-            actions.append("acknowledge every observation")
         guidance = (
             f"Next: {' and '.join(actions)} with `merani decide` or "
             f"`decide-batch` before continuing.{coverage_guidance}"
@@ -9412,7 +9411,9 @@ def final_assurance_is_fresh(
     )
 
 
-def final_contract_trust(final: dict[str, Any]) -> tuple[bool, list[str]]:
+def final_contract_trust(
+    final: dict[str, Any], metadata: dict[str, Any] | None = None
+) -> tuple[bool, list[str]]:
     """Return whether a final carries the structured Codex gate contract."""
     issues: list[str] = []
     schema_version = final.get("schema_version")
@@ -9456,7 +9457,10 @@ def final_contract_trust(final: dict[str, Any]) -> tuple[bool, list[str]]:
         issues.append("structured validation is missing; refinalize with --check-result")
     else:
         try:
-            expected_validation = evaluate_checks(validation.get("checks"))
+            planned = validation.get("required_checks")
+            expected_validation = evaluate_checks(validation.get("checks"), planned)
+            if metadata is not None and planned != metadata.get("required_checks"):
+                issues.append("required checks do not match the pinned review contract")
             if validation != expected_validation:
                 issues.append("structured validation summary does not match check results")
             if expected_validation["status"] == "BLOCK" and str(final.get("status")) not in {
@@ -9601,7 +9605,7 @@ def finalize_command(args: argparse.Namespace) -> int:
                     candidate_metadata.get("run_id") or candidate_dir.name
                 )
                 raise ReviewError(
-                    "Every finding, test gap, and observation must be decided before "
+                    "Every finding and test gap must be decided before "
                     f"finalization: {run_identifier}:"
                     + f", {run_identifier}:".join(pending)
                 )
@@ -9664,7 +9668,7 @@ def finalize_command(args: argparse.Namespace) -> int:
     verification = [item.strip() for item in args.verification if item.strip()]
     try:
         checks = [parse_check_result(item) for item in getattr(args, "check_result", [])]
-        validation = evaluate_checks(checks)
+        validation = evaluate_checks(checks, metadata.get("required_checks"))
     except (ValueError, TypeError) as exc:
         raise ReviewError(f"Invalid --check-result: {exc}") from exc
     if any(
@@ -9853,6 +9857,10 @@ def finalize_command(args: argparse.Namespace) -> int:
             str(item.get("id"))
             for item in accepted_test_gaps + deferred_test_gaps
         ],
+        "observations": [
+            final_item_reference(item, candidate_dir, candidate_metadata)
+            for item, candidate_dir, candidate_metadata in history_observations
+        ],
         "acknowledged_observations": [
             final_item_reference(item, candidate_dir, candidate_metadata)
             for item, candidate_dir, candidate_metadata in history_observations
@@ -9879,7 +9887,7 @@ def verify_command(args: argparse.Namespace) -> int:
     if not final_path.exists():
         raise ReviewError(f"Run has not been finalized: {run_dir}")
     final = read_json(final_path)
-    final_contract_trusted, final_contract_issues = final_contract_trust(final)
+    final_contract_trusted, final_contract_issues = final_contract_trust(final, metadata)
     freshness = freshness_status(
         run_dir, metadata, final.get("source_fingerprint")
     )
@@ -9999,7 +10007,7 @@ def attest_commit_command(args: argparse.Namespace) -> int:
         )
     with exclusive_file_lock(final_path):
         final = read_json(final_path)
-        trusted, issues = final_contract_trust(final)
+        trusted, issues = final_contract_trust(final, metadata)
         if not trusted:
             raise ReviewError(
                 "Cannot attest an untrusted legacy final: " + "; ".join(issues)
@@ -10411,7 +10419,7 @@ def persist_review_results(
             return {**item, **{key: value for key, value in previous.items() if key not in item}}
         return {
             **item,
-            "decision": "pending",
+            "decision": "recorded" if item.get("kind") == "observation" else "pending",
             "evidence": None,
             "action": None,
             "verification": None,
@@ -10711,6 +10719,13 @@ def resume_review_locked(
     )
     if metadata.get("status") not in {"partial", "failed"}:
         raise ReviewError("Only a partial or failed reviewer run can be resumed.")
+    try:
+        normalize_required_checks(metadata.get("required_checks"))
+    except ValidationError as exc:
+        raise ReviewError(
+            "This run has no valid predeclared check list. Start a linked successor "
+            "with --required-check instead of resuming."
+        ) from exc
     failure = metadata.get("failure")
     if not isinstance(failure, dict) or failure.get("type") != "reviewer_failure":
         raise ReviewError("This run did not fail because a reviewer invocation failed.")
@@ -11132,6 +11147,8 @@ def run_review_command(args: argparse.Namespace) -> int:
     config = load_config()
     supplemental_parent: tuple[Path, dict[str, Any], dict[str, Any]] | None = None
     if args.supplemental_of:
+        if args.required_check is not None:
+            raise ReviewError("Supplemental reviews reuse the parent's required checks; do not override --required-check.")
         if args.workflow_id or args.reuse_contract:
             raise ReviewError(
                 "--supplemental-of creates its own one-review workflow and cannot "
@@ -11145,7 +11162,7 @@ def run_review_command(args: argparse.Namespace) -> int:
         if not parent_final_path.exists():
             raise ReviewError("Supplemental review requires a finalized parent run.")
         parent_final = read_json(parent_final_path)
-        parent_trusted, parent_issues = final_contract_trust(parent_final)
+        parent_trusted, parent_issues = final_contract_trust(parent_final, parent_metadata)
         if not parent_trusted:
             raise ReviewError(
                 "Supplemental review requires a structured trusted parent "
@@ -11179,6 +11196,7 @@ def run_review_command(args: argparse.Namespace) -> int:
         )
         args.risk = list(parent_metadata.get("risks") or [])
         args.review_profile = str(parent_metadata.get("review_profile") or "normal")
+        args.required_check = parent_metadata.get("required_checks")
         args.uncommitted = False
         args.base = None
         args.commit = None
@@ -11278,10 +11296,11 @@ def run_review_command(args: argparse.Namespace) -> int:
             or args.exclude_snapshot_path
             or args.criterion
             or args.critical_invariant
+            or args.required_check is not None
         ):
             raise ReviewError(
                 "--reuse-contract cannot be combined with path, risk, profile, "
-                "task, or assurance-claim overrides."
+                "task, required-check, or assurance-claim overrides."
             )
         pinned = baseline_review_contract(
             selected_workflow,
@@ -11316,6 +11335,7 @@ def run_review_command(args: argparse.Namespace) -> int:
         args.risk = list(pinned.get("risks") or [])
         args.review_profile = str(pinned.get("review_profile") or "normal")
         args.task = pinned.get("task")
+        args.required_check = pinned.get("required_checks")
         pinned_assurance = pinned.get("assurance_contract")
         reused_assurance_contract = (
             pinned_assurance if isinstance(pinned_assurance, dict) else None
@@ -11324,6 +11344,12 @@ def run_review_command(args: argparse.Namespace) -> int:
             pinned.get("snapshot_exclusion_paths") or []
         )
 
+    try:
+        required_checks = normalize_required_checks(args.required_check)
+    except ValidationError as exc:
+        raise ReviewError(str(exc)) from exc
+    if any(assurance_text_is_sensitive(name) for name in required_checks):
+        raise ReviewError("Required check names must not contain secret-like content")
     try:
         assurance_contract = (
             reused_assurance_contract
@@ -11404,6 +11430,7 @@ def run_review_command(args: argparse.Namespace) -> int:
             "review_profile": args.review_profile,
             "task": args.task,
             "assurance_contract": assurance_contract,
+            "required_checks": required_checks,
             "supplemental_of": (
                 str(supplemental_parent[0]) if supplemental_parent else None
             ),
@@ -11460,6 +11487,7 @@ def run_review_command(args: argparse.Namespace) -> int:
             review_profile=args.review_profile,
             task=args.task,
             assurance_contract=assurance_contract,
+            required_checks=required_checks,
             snapshot_exclusion_paths=[
                 str(item["path"]) for item in snapshot_exclusions
             ],
@@ -12357,6 +12385,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         choices=sorted(VALID_RISKS),
         help="Enable a risk-specific review and verification profile",
+    )
+    run_parser.add_argument(
+        "--required-check", action="append", default=None, metavar="NAME",
+        help=(
+            "Name one required check before the first review; repeat for every check. "
+            "Pinned per repository and inherited by --reuse-contract and supplemental reviews. "
+            "Missing results block finalization; results remain controller-reported."
+        ),
     )
     run_parser.add_argument(
         "--workflow-id",

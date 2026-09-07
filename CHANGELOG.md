@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Pin required check names on each repository's first review with `--required-check`.
+  Missing declared results block finalization; confirmation, supplemental reviews,
+  and reused successor contracts retain the list. Results remain controller-reported.
+- Keep informational observations in reports and final artifacts without requiring
+  acknowledgement. Findings and test gaps still require decisions.
+- Shorten the skill entrypoint and slash command; load recovery, provider, and
+  authorized GitHub handoff instructions only when needed.
+
 - Rename the project, plugin, skill, and command to Merani. See
   [upgrade notes](docs/upgrading.md) for installation and compatibility details.
 - Shorten the README and public descriptions; state the review and evidence limits
