@@ -53,9 +53,13 @@ Already using Multi-Model Review? See the [upgrade notes](docs/upgrading.md).
 ## What a passing result means
 
 The configured review process finished, findings have recorded decisions, and
-the result still matches the reviewed code. Checks and supporting evidence are
-reported by Codex; Merani validates their structure and freshness, not whether
-every statement is true or every necessary test was included.
+the result still matches the reviewed code. Codex declares required checks before
+each repository's first review with `--required-check`; missing, failed, or unrun
+results block a passing result. Informational observations need no acknowledgement.
+
+Checks and supporting evidence are reported by Codex. Merani checks that every
+declared check has a result, but cannot prove every statement is true or discover
+a requirement left out of the original list.
 
 Models can miss bugs and report false positives. Merani does not replace tests,
 human judgment, or checks of the deployed system. We have not established that

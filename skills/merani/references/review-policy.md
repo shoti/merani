@@ -10,6 +10,9 @@ that ignore an existing guard elsewhere in the call path.
 A low-severity observation that explicitly has no reachable impact and needs no
 action is not a finding. Preserve it as non-gating audit evidence without
 creating triage work. Never suppress a medium, high, or blocker item this way.
+Observations stay in the reports, triage audit, and final artifact. They do not
+require a decision; `acknowledged` remains available for optional annotations.
+Do not turn a plausible defect or missing test into an observation to avoid triage.
 
 Use these severities:
 
@@ -116,12 +119,21 @@ unassured rather than receiving synthesized claim coverage.
 
 Known required test, build, lint or CI failures block handoff even if they are
 pre-existing or outside the scoped diff. They are failed checks, not deferrable
-review findings. Capture every required check with the structured `--check-result`
+review findings. Declare each check with `run --required-check NAME` before the
+repository's first review. The list is pinned with that repository's contract;
+confirmation and `--reuse-contract` retain it, and a deliberate change requires
+a successor. Supplemental reviews inherit the parent list. Every required name
+must have a result; a different passing check cannot replace a missing one.
+Capture every required check with the structured `--check-result`
 contract; failed, unrun or missing results force `BLOCK`. Verification prose alone
 cannot establish readiness. Run the final combined branch and inspect CI for the
 pushed SHA. Report local results, pending CI and deployment evidence separately.
 A reviewer without terminal access provides static review only. The controller
 must not infer a green suite from reviewer agreement or focused tests.
+Results remain controller-reported. Merani validates names, outcomes, and
+freshness; it neither runs checks nor proves the declared list is complete.
+Older runs without a declared check list need a successor review, not a list
+invented during finalization.
 
 ## Convergence gate
 
@@ -133,7 +145,7 @@ Repair until:
 
 - no accepted blocker/high findings remain;
 - the remaining findings are rejected with evidence; or
-- three repair rounds have completed.
+- the selected mode's repair-round limit has been reached.
 
 Then run one independent confirmation round against the intended final source.
 Do not use confirmation as another open-ended design pass. An accepted or
@@ -178,7 +190,7 @@ Committing an unchanged reviewed working tree is a state transition, not a code
 change. Use `merani attest-commit` to bind the final gate to the checked-out
 equivalent commit. The command must reject changed scoped content.
 
-At the three-repair limit, proceed to confirmation only if no further source
+At the selected mode's repair-round limit, proceed to confirmation only if no further source
 change is planned. Otherwise present unresolved disagreements to the user. Do
 not silently pick the most confident-sounding model.
 

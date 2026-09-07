@@ -22,12 +22,32 @@ def parse_check_result(value: str) -> object:
     return json.loads(value, object_pairs_hook=unique_fields)
 
 
-def evaluate_checks(checks: object) -> dict[str, Any]:
+def normalize_required_checks(value: object) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 100:
+        raise ValidationError("Declare 1 to 100 required checks with --required-check before review")
+    names: dict[str, str] = {}
+    for name in value:
+        if not isinstance(name, str) or not name.strip() or len(name) > 4000:
+            raise ValidationError("Required check names must be nonempty text of at most 4000 characters")
+        clean = name.strip()
+        key = clean.casefold()
+        if key in names:
+            raise ValidationError("Required check names must be unique")
+        names[key] = clean
+    return [names[key] for key in sorted(names)]
+
+
+def evaluate_checks(checks: object, required_checks: object = None) -> dict[str, Any]:
     if not isinstance(checks, list) or len(checks) > 100:
         raise ValidationError("check results must be a list of at most 100 checks")
     names: set[str] = set()
     normalized: list[dict[str, Any]] = []
     issues: list[str] = []
+    planned = None
+    if required_checks is None:
+        issues.append("Required checks were not declared before review; start a successor with --required-check")
+    else:
+        planned = normalize_required_checks(required_checks)
     if not checks:
         issues.append("No structured check results; record every required check with --check-result")
     for check in checks:
@@ -58,8 +78,12 @@ def evaluate_checks(checks: object) -> dict[str, Any]:
         })
         if status != "passed":
             issues.append(f"Required check {name}: {status}")
+    for name in planned or []:
+        if name.casefold() not in names:
+            issues.append(f"Missing required check result: {name}")
     return {
         "status": "BLOCK" if issues else "PASS_CLEAN",
+        "required_checks": planned,
         "checks": normalized,
         "issues": issues,
     }

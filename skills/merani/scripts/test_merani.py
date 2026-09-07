@@ -37,6 +37,8 @@ PASSED_CHECK = {
     "exit_code": 0, "evidence": "Isolated fake-provider fixture verification passed.",
 }
 
+REQUIRED_CHECKS = [PASSED_CHECK["name"]]
+
 
 def run(
     command: list[str],
@@ -74,6 +76,7 @@ def initialize_assurance_artifacts(
 ) -> dict[str, object]:
     contract = AM.build_contract(criteria, critical_invariants or [])
     metadata: dict[str, object] = {
+        "required_checks": REQUIRED_CHECKS,
         "status": "completed",
         "run_id": "run-one",
         "workflow_id": "wf-one",
@@ -462,6 +465,39 @@ class FakeProviderHarness:
 
 
 class RunnerUnitTests(unittest.TestCase):
+    def test_declared_checks_cannot_disappear_from_validation(self) -> None:
+        tests = dict(PASSED_CHECK, name="unit tests")
+        build = dict(PASSED_CHECK, name="build")
+        plan = ["unit tests", "build"]
+        missing = MM.evaluate_checks([tests], plan)
+        self.assertEqual(missing["status"], "BLOCK")
+        self.assertIn("Missing required check result: build", missing["issues"])
+        self.assertEqual(MM.evaluate_checks([tests])["status"], "BLOCK")
+        complete = MM.evaluate_checks([build, dict(tests, name=" UNIT TESTS ")], plan)
+        self.assertEqual(complete["status"], "PASS_CLEAN")
+        extra_failure = dict(PASSED_CHECK, name="integration", status="failed", exit_code=1)
+        self.assertEqual(MM.evaluate_checks([build, tests, extra_failure], plan)["status"], "BLOCK")
+        for invalid in [[], {}, "tests", [None], [" "], ["tests", " TESTS "], ["x"] * 101]:
+            with self.subTest(plan=invalid), self.assertRaises(MM.ValidationError):
+                MM.normalize_required_checks(invalid)
+
+    def test_required_check_plans_are_scoped_to_each_repository(self) -> None:
+        runs = [
+            (Path("/one"), {"repository": {"id": "one"}, "status": "completed", "required_checks": ["build"]}),
+            (Path("/two"), {"repository": {"id": "two"}, "status": "completed", "required_checks": ["tests"]}),
+        ]
+        with mock.patch.object(MM, "workflow_runs", return_value=runs):
+            self.assertEqual(MM.baseline_review_contract("wf", "one")["required_checks"], ["build"])
+            self.assertEqual(MM.baseline_review_contract("wf", "two")["required_checks"], ["tests"])
+
+    def test_observations_do_not_hide_pending_findings_or_test_gaps(self) -> None:
+        triage = {
+            "findings": [{"id": "high", "severity": "high", "decision": "pending"}],
+            "test_gaps": [{"id": "gap", "kind": "test_gap", "decision": "pending"}],
+            "observations": [{"id": "note", "kind": "observation", "decision": "pending"}],
+        }
+        self.assertEqual(MM.pending_triage_ids(triage), ["high", "gap"])
+
     def test_free_form_report_cannot_discard_unparsed_findings(self) -> None:
         for findings in (
             "## [critical] Data loss\n- Evidence: reachable deletion\n",
@@ -679,6 +715,7 @@ class RunnerUnitTests(unittest.TestCase):
         baseline = (
             Path("/private/tmp/repair"),
             {
+                "required_checks": REQUIRED_CHECKS,
                 "repository": {"id": "repo-1"},
                 "status": "completed",
                 "round": 1,
@@ -705,13 +742,13 @@ class RunnerUnitTests(unittest.TestCase):
             "task": "Task",
         }
         with mock.patch.object(MM, "workflow_runs", return_value=[baseline]):
-            MM.validate_review_contract(**common, assurance_contract=contract)
+            MM.validate_review_contract(required_checks=REQUIRED_CHECKS, **common, assurance_contract=contract)
             with self.assertRaisesRegex(MM.ReviewError, "assurance_contract"):
-                MM.validate_review_contract(
+                MM.validate_review_contract(required_checks=REQUIRED_CHECKS,
                     **common, phase="confirmation", assurance_contract=None
                 )
             with self.assertRaisesRegex(MM.ReviewError, "linked successor"):
-                MM.validate_review_contract(
+                MM.validate_review_contract(required_checks=REQUIRED_CHECKS,
                     **common, assurance_contract=changed
                 )
 
@@ -832,6 +869,7 @@ class RunnerUnitTests(unittest.TestCase):
             run_dir = Path(temporary).resolve()
             contract = AM.build_contract(["C1=One", "C2=Two"], [])
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "status": "completed",
                 "run_id": "run-one",
                 "workflow_id": "wf-one",
@@ -1398,6 +1436,7 @@ class RunnerUnitTests(unittest.TestCase):
             (run_dir / "codex.md").write_text(report, encoding="utf-8")
             (run_dir / "codex.stderr.log").write_text("", encoding="utf-8")
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-one",
                 "workflow_id": "wf-one",
                 "repository": {"id": "repo-one"},
@@ -1478,6 +1517,7 @@ class RunnerUnitTests(unittest.TestCase):
             run_dir = Path(temporary).resolve()
             contract = AM.build_contract([], ["I1=Fail closed"])
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "status": "completed",
                 "run_id": "run-one",
                 "workflow_id": "",
@@ -1552,6 +1592,7 @@ class RunnerUnitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary).resolve()
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "status": "completed",
                 "run_id": "run-legacy",
                 "workflow_id": "",
@@ -1614,7 +1655,7 @@ class RunnerUnitTests(unittest.TestCase):
     def test_claude_review_has_effort_and_budget_caps(self) -> None:
         args = MM.build_parser().parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--with-claude",
                 "--without-antigravity",
                 "--without-kimi",
@@ -1645,7 +1686,7 @@ class RunnerUnitTests(unittest.TestCase):
         for invalid in ("nan", "inf"):
             invalid_args = MM.build_parser().parse_args(
                 [
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--with-claude",
                     "--without-antigravity",
                     "--without-kimi",
@@ -1659,7 +1700,7 @@ class RunnerUnitTests(unittest.TestCase):
     def test_codex_review_is_ephemeral_schema_constrained_and_workspace_only(self) -> None:
         args = MM.build_parser().parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-codex",
                 "--without-antigravity",
@@ -1959,7 +2000,7 @@ class RunnerUnitTests(unittest.TestCase):
     def test_codex_api_key_authentication_is_rejected(self) -> None:
         args = MM.build_parser().parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-codex",
                 "--without-antigravity",
@@ -2714,6 +2755,7 @@ class RunnerUnitTests(unittest.TestCase):
             (
                 Path(f"/private/tmp/run-{round_number}"),
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": f"run-{round_number}",
                     "repository": repository,
                     "status": "completed",
@@ -3198,7 +3240,7 @@ class RunnerUnitTests(unittest.TestCase):
             }
         }
         guidance = MM.review_next_guidance(observations, "repair")
-        self.assertIn("acknowledge every observation", guidance)
+        self.assertNotIn("acknowledge", guidance)
         self.assertNotIn("finding", guidance)
         self.assertNotIn("test gap", guidance)
 
@@ -3243,7 +3285,7 @@ class RunnerUnitTests(unittest.TestCase):
             MM.review_next_guidance(test_gaps, "repair"),
         )
         self.assertIn(
-            "decide every finding and every test gap and acknowledge every observation",
+            "decide every finding and every test gap",
             MM.review_next_guidance(mixed, "repair"),
         )
 
@@ -3312,7 +3354,7 @@ class RunnerUnitTests(unittest.TestCase):
             }
         }
         guidance = MM.review_next_guidance(observations, "supplemental")
-        self.assertIn("acknowledge every observation", guidance)
+        self.assertNotIn("acknowledge", guidance)
         self.assertIn("finalize and verify this supplemental evidence", guidance)
         self.assertIn("does not replace the parent gate", guidance)
 
@@ -3356,6 +3398,7 @@ class RunnerUnitTests(unittest.TestCase):
                 MM.safe_write_json(
                     run_dir / "metadata.json",
                     {
+                        "required_checks": REQUIRED_CHECKS,
                         "schema_version": 10,
                         "workflow_id": "wf-partial",
                         "run_id": "run-partial",
@@ -3776,6 +3819,7 @@ class RunnerUnitTests(unittest.TestCase):
             paths = MM.changed_paths(repo, scope)
             source_fingerprint = MM.fingerprint(repo, scope, paths, ())
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "repository": {
                     "root": str(repo),
                     "head": None,
@@ -3839,6 +3883,7 @@ class RunnerUnitTests(unittest.TestCase):
                 paths = MM.changed_paths(repo, scope)
                 source_fingerprint = MM.fingerprint(repo, scope, paths, ())
                 metadata: dict[str, object] = {
+                    "required_checks": REQUIRED_CHECKS,
                     "repository": {
                         "root": str(repo),
                         "head": None,
@@ -3927,6 +3972,7 @@ class RunnerUnitTests(unittest.TestCase):
                 },
             )
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-1",
                 "repository": {"id": "repo-1"},
                 "status": "completed",
@@ -3996,6 +4042,7 @@ class RunnerUnitTests(unittest.TestCase):
         baseline = (
             Path("/private/tmp/repair"),
             {
+                "required_checks": REQUIRED_CHECKS,
                 "repository": {"id": "repo-1"},
                 "status": "completed",
                 "round": 1,
@@ -4015,6 +4062,7 @@ class RunnerUnitTests(unittest.TestCase):
             MM.validate_review_contract(
                 "wf-test",
                 "repo-1",
+                required_checks=REQUIRED_CHECKS,
                 scope=MM.Scope("uncommitted", None, "test"),
                 path_filters=("src/feature.py",),
                 risks=("db-write",),
@@ -4025,6 +4073,7 @@ class RunnerUnitTests(unittest.TestCase):
                 MM.validate_review_contract(
                     "wf-test",
                     "repo-1",
+                    required_checks=REQUIRED_CHECKS,
                     scope=MM.Scope("uncommitted", None, "test"),
                     path_filters=("unrelated.txt",),
                     risks=(),
@@ -4035,6 +4084,7 @@ class RunnerUnitTests(unittest.TestCase):
                 MM.validate_review_contract(
                     "wf-test",
                     "repo-1",
+                    required_checks=REQUIRED_CHECKS,
                     phase="confirmation",
                     scope=MM.Scope("uncommitted", None, "test"),
                     path_filters=("src/feature.py",),
@@ -4077,7 +4127,7 @@ class RunnerUnitTests(unittest.TestCase):
             (repo / "REVIEW.md").write_text("local notes\n", encoding="utf-8")
             (repo / "unrelated.txt").write_text("dirty\n", encoding="utf-8")
             args = MM.build_parser().parse_args(
-                ["run", "--commit", "HEAD", "--path", "src"]
+                ["run", "--required-check", PASSED_CHECK["name"], "--commit", "HEAD", "--path", "src"]
             )
 
             scope = MM.resolve_scope(args, repo, ("src",))
@@ -4321,6 +4371,7 @@ class RunnerUnitTests(unittest.TestCase):
         active = (
             Path("/private/tmp/running-review"),
             {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-active",
                 "workflow_id": "wf-active",
                 "repository": {"id": "repo-1", "name": "repo"},
@@ -4347,6 +4398,7 @@ class RunnerUnitTests(unittest.TestCase):
         invalid = (
             Path("/private/tmp/invalid-review"),
             {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-invalid",
                 "workflow_id": "wf-invalid",
                 "repository": {"id": "repo-1", "name": "repo"},
@@ -4421,6 +4473,7 @@ class RunnerUnitTests(unittest.TestCase):
         failed = (
             Path("/private/tmp/failed-review"),
             {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-failed",
                 "workflow_id": "wf-failed",
                 "repository": {"id": "repo-1", "name": "repo"},
@@ -4721,7 +4774,7 @@ None.
         parser = MM.build_parser()
         args = parser.parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-antigravity",
                 "--without-kimi",
@@ -5289,6 +5342,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-stale",
                     "workflow_id": "wf-stale",
                     "status": "preflight",
@@ -5336,7 +5390,7 @@ None.
                 MM.create_workflow("wf-concurrent", usage_based=True)
             args = MM.build_parser().parse_args(
                 [
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--workflow-id",
@@ -5467,7 +5521,7 @@ None.
         parser = MM.build_parser()
         automatic_args = parser.parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-antigravity",
                 "--without-kimi",
@@ -5475,7 +5529,7 @@ None.
         )
         explicit_args = parser.parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-antigravity",
                 "--without-kimi",
@@ -5521,7 +5575,7 @@ None.
     def test_locked_provider_rejects_one_run_override(self) -> None:
         args = MM.build_parser().parse_args(
             [
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--without-claude",
                 "--with-antigravity",
                 "--without-kimi",
@@ -5712,7 +5766,7 @@ None.
             (repo / "src" / "outside-link").symlink_to(outside)
             args = MM.build_parser().parse_args(
                 [
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -5749,7 +5803,7 @@ None.
             )
             args = MM.build_parser().parse_args(
                 [
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -6045,6 +6099,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "status": "completed",
                     "phase": "confirmation",
                     "source_fingerprint": "fingerprint",
@@ -6186,6 +6241,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "status": "completed",
                     "workflow_id": "wf-attest",
                     "repository": {"root": str(repo), "head": head},
@@ -6211,7 +6267,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-attest": "a" * 64},
-                    "validation": MM.evaluate_checks([PASSED_CHECK]),
+                    "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
                 },
             )
 
@@ -6343,6 +6399,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "repository": {"root": str(repo)},
                     "scope": {
                         "kind": scope.kind,
@@ -7291,6 +7348,7 @@ None.
 
     def test_successor_missing_inherited_repository_cannot_finalize(self) -> None:
         metadata = {
+            "required_checks": REQUIRED_CHECKS,
             "workflow_id": "wf-successor",
             "run_id": "run-one",
             "repository": {
@@ -7333,7 +7391,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-one": "a" * 64},
-                    "validation": MM.evaluate_checks([PASSED_CHECK]),
+                    "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
                     "assurance": {
                         "classification": "legacy_unassured",
                         "status": "NOT_EVALUATED",
@@ -7561,7 +7619,7 @@ None.
                 MM.safe_write_json(workflows / "wf-old.json", document)
                 args = MM.build_parser().parse_args(
                     [
-                        "run",
+                        "run", "--required-check", PASSED_CHECK["name"],
                         "--repo",
                         str(repo),
                         "--workflow-id",
@@ -7599,6 +7657,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "schema_version": 9,
                     "run_id": "run-resume",
                     "status": "partial",
@@ -7701,6 +7760,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "schema_version": 9,
                     "run_id": "run-budget",
                     "status": "failed",
@@ -7779,6 +7839,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "schema_version": 10,
                     "run_id": "run-mixed",
                     "status": "partial",
@@ -7865,6 +7926,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "schema_version": 10,
                     "run_id": "run-reserved",
                     "status": "failed",
@@ -8085,7 +8147,7 @@ None.
             )
             args = MM.build_parser().parse_args(
                 [
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -8114,7 +8176,7 @@ None.
 
     def test_direct_sensitive_finding_override_is_rejected(self) -> None:
         args = MM.build_parser().parse_args(
-            ["run", "--allow-sensitive-finding", "deadbeef1234"]
+            ["run", "--required-check", PASSED_CHECK["name"], "--allow-sensitive-finding", "deadbeef1234"]
         )
         with self.assertRaisesRegex(
             MM.ReviewError, "Direct sensitive-content overrides"
@@ -8583,6 +8645,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-one",
                     "workflow_id": "wf-successor",
                     "repository": {"id": "repo-one", "name": "repo"},
@@ -8767,6 +8830,7 @@ None.
             workflows.mkdir()
             run_dir.mkdir(parents=True)
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-one",
                 "workflow_id": "wf-one",
                 "created_at": MM.utc_now(),
@@ -8814,6 +8878,7 @@ None.
                 run_dir = root / identifier / "run"
                 run_dir.mkdir(parents=True)
                 metadata = {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": f"run-{identifier}",
                     "workflow_id": identifier,
                     "created_at": MM.utc_now(),
@@ -8977,12 +9042,14 @@ None.
                     },
                 )
             pending_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-pending",
                 "workflow_id": "wf-20260806T000000Z-pending",
                 "status": "completed",
                 "created_at": MM.utc_now(),
             }
             final_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-final",
                 "workflow_id": "wf-20260806T000001Z-final",
                 "status": "completed",
@@ -9007,6 +9074,7 @@ None.
                 },
             )
             legacy_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-legacy",
                 "workflow_id": "wf-20260806T000003Z-legacy",
                 "status": "completed",
@@ -9020,7 +9088,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-final": "a" * 64},
-                    "validation": MM.evaluate_checks([PASSED_CHECK]),
+                    "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
                 },
             )
             MM.safe_write_json(
@@ -9265,7 +9333,7 @@ None.
             triage = MM.read_json(run_dir / "triage.json")
         self.assertEqual(triage["findings"], [])
         self.assertEqual(len(triage["observations"]), 1)
-        self.assertEqual(triage["observations"][0]["decision"], "pending")
+        self.assertEqual(triage["observations"][0]["decision"], "recorded")
 
     def test_mode_recommendation_fails_closed_for_explicit_risk(self) -> None:
         args = MM.build_parser().parse_args(
@@ -9290,6 +9358,7 @@ None.
 
     def test_workflow_status_distinguishes_ready_to_finalize_and_completed(self) -> None:
         metadata = {
+            "required_checks": REQUIRED_CHECKS,
             "workflow_id": "wf-done",
             "run_id": "run-done",
             "repository": {"id": "repo-one"},
@@ -9314,7 +9383,7 @@ None.
                 "codex_verdict": "PASS_CLEAN",
                 "triage_status": "PASS_CLEAN",
                 "triage_sha256s": {"run-done": "a" * 64},
-                "validation": MM.evaluate_checks([PASSED_CHECK]),
+                "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
             }
             MM.safe_write_json(
                 workflows / "wf-done.json",
@@ -9358,6 +9427,7 @@ None.
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
             MM.safe_write_json(run_dir / "metadata.json", {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-failed-suite", "status": "completed",
                 "phase": "confirmation", "source_fingerprint": "same", "risks": [],
             })
@@ -9383,6 +9453,7 @@ None.
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
                 run_dir = Path(temporary)
                 MM.safe_write_json(run_dir / "metadata.json", {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-checks", "status": "completed",
                     "phase": "confirmation", "source_fingerprint": "same", "risks": [],
                 })
@@ -9426,7 +9497,7 @@ None.
             "codex_verdict": "PASS_WITH_FINDINGS", "triage_status": "PASS_CLEAN",
             "triage_sha256s": {"run-one": "a" * 64},
             "assurance": {"classification": "no_explicit_claims", "status": "PASS_CLEAN"},
-            "validation": MM.evaluate_checks([failed]),
+            "validation": MM.evaluate_checks([failed], REQUIRED_CHECKS),
         }
         self.assertFalse(MM.final_contract_trust(final)[0])
         final["validation"]["status"] = "PASS_CLEAN"
@@ -9446,6 +9517,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-codex-block",
                     "status": "completed",
                     "phase": "confirmation",
@@ -9492,6 +9564,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-title-collision",
                     "status": "completed",
                     "phase": "confirmation",
@@ -9561,6 +9634,7 @@ None.
             run_dir.mkdir()
             alias_dir.symlink_to(run_dir, target_is_directory=True)
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-symlink",
                 "workflow_id": "wf-symlink",
                 "repository": {"id": "repo-symlink", "root": "/repo"},
@@ -9624,6 +9698,7 @@ None.
             confirmation_dir.mkdir()
             repository = {"id": "repo-one", "root": "/repo"}
             repair_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-repair",
                 "workflow_id": "wf-history",
                 "repository": repository,
@@ -9632,6 +9707,7 @@ None.
                 "round": 1,
             }
             confirmation_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-confirmation",
                 "workflow_id": "wf-history",
                 "repository": repository,
@@ -9756,6 +9832,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-supplemental",
                     "workflow_id": "wf-supplemental",
                     "status": "completed",
@@ -9836,7 +9913,7 @@ None.
             self.assertEqual(workflow["status"], "completed")
             self.assertEqual(final["state"], "completed")
 
-    def test_structured_observations_are_explicit_and_require_acknowledgment(
+    def test_structured_observations_are_informational_with_optional_acknowledgment(
         self,
     ) -> None:
         report = MM.render_structured_review(
@@ -9872,7 +9949,7 @@ None.
             "observations": [{**observation, "decision": "pending"}],
         }
         self.assertEqual(
-            MM.pending_triage_ids(triage), ["claude-observation-001"]
+            MM.pending_triage_ids(triage), []
         )
         with self.assertRaisesRegex(MM.ReviewError, "invalid for observation"):
             MM.apply_triage_decision(
@@ -10228,6 +10305,7 @@ None.
                 },
             )
             metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "status": "completed",
                 "completed_at": "2026-08-11T10:00:00+00:00",
                 "run_id": "run-fixed",
@@ -10239,6 +10317,7 @@ None.
                 {"findings": [], "test_gaps": [], "observations": []},
             )
             verified_metadata = {
+                "required_checks": REQUIRED_CHECKS,
                 "status": "completed",
                 "completed_at": "2026-08-11T10:01:00+00:00",
                 "run_id": "run-verified",
@@ -10276,6 +10355,7 @@ None.
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "required_checks": REQUIRED_CHECKS,
                     "run_id": "run-excluded",
                     "status": "completed",
                     "phase": "confirmation",
@@ -10615,6 +10695,83 @@ None.
 
 
 class RunnerEndToEndTests(unittest.TestCase):
+    def test_check_plan_and_informational_observations_through_final_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n")
+            harness = FakeProviderHarness(root)
+            workflow = harness.cli(repo, "workflow", "start").stdout.strip()
+            base = ["run", "--workflow-id", workflow]
+            missing = harness.cli(repo, *base, "--uncommitted", check=False)
+            self.assertIn("--required-check", missing.stderr)
+            self.assertEqual(harness.invocations(), [])
+
+            report = structured_report(observations=(
+                "## [low] Isolated fixture\n"
+                "- Location: src/feature.py:1\n"
+                "- Evidence: This repository contains only an isolated test fixture.\n"
+                "- Why non-actionable: No production behavior or required change."
+            ))
+            harness.queue("claude", {"report": report}, {"report": report})
+            harness.cli(
+                repo, *base, "--uncommitted", "--required-check", "unit tests",
+                "--required-check", "build", provider_backed=True,
+            )
+            repair = next(p for p in harness.run_directories() if MM.read_json(p / "metadata.json")["status"] == "completed")
+            self.assertEqual(MM.pending_triage_ids(MM.read_json(repair / "triage.json")), [])
+            before_calls = len(harness.invocations())
+            drift = harness.cli(
+                repo, *base, "--uncommitted", "--phase", "confirmation",
+                "--required-check", "unit tests", check=False, provider_backed=True,
+            )
+            self.assertIn("required_checks", drift.stderr)
+            self.assertEqual(len(harness.invocations()), before_calls)
+            harness.cli(repo, *base, "--phase", "confirmation", "--reuse-contract", provider_backed=True)
+            confirmation = next(
+                p for p in harness.run_directories()
+                if (m := MM.read_json(p / "metadata.json"))["status"] == "completed"
+                and m["phase"] == "confirmation"
+            )
+            self.assertEqual(MM.read_json(confirmation / "metadata.json")["required_checks"], ["build", "unit tests"])
+            tests = dict(PASSED_CHECK, name="unit tests")
+            build = dict(PASSED_CHECK, name="build")
+            final_args = [
+                "finalize", "--run", str(confirmation), "--codex-verdict", "PASS_CLEAN",
+                "--codex-review", "Inspected fixture and check outcomes.",
+                "--check-result", json.dumps(tests),
+            ]
+            self.assertEqual(harness.cli(repo, *final_args, check=False).returncode, 3)
+            self.assertIn("Missing required check result: build", MM.read_json(confirmation / "final.json")["validation"]["issues"])
+            harness.cli(repo, *final_args, "--check-result", json.dumps(build))
+            final_path = confirmation / "final.json"
+            final = MM.read_json(final_path)
+            self.assertEqual(len(final["observations"]), 2)
+            self.assertEqual(final["acknowledged_observations"], [])
+            harness.cli(repo, "verify", "--run", str(confirmation))
+
+            forged = dict(final, validation=MM.evaluate_checks([tests], ["unit tests"]))
+            MM.safe_write_json(final_path, forged)
+            self.assertEqual(harness.cli(repo, "verify", "--run", str(confirmation), check=False).returncode, 3)
+            state = json.loads(harness.cli(repo, "workflow", "status", workflow, check=False).stdout)
+            self.assertFalse(state["ready"])
+            attestation = harness.cli(repo, "attest-commit", "--run", str(confirmation), "--commit", "HEAD", check=False)
+            self.assertIn("required checks do not match", attestation.stderr)
+            MM.safe_write_json(final_path, final)
+            harness.cli(repo, "workflow", "finalize", workflow)
+
+            harness.queue("claude", {"report": structured_report()})
+            harness.cli(repo, "run", "--supplemental-of", str(confirmation), "--task", "Check the fixture once more.", provider_backed=True)
+            supplemental = next(p for p in harness.run_directories() if MM.read_json(p / "metadata.json")["phase"] == "supplemental")
+            self.assertEqual(MM.read_json(supplemental / "metadata.json")["required_checks"], ["build", "unit tests"])
+            successor = harness.cli(repo, "workflow", "supersede", workflow, "--reason", "Continue the same task.").stdout.strip()
+            harness.queue("claude", {"report": structured_report()})
+            harness.cli(repo, "run", "--workflow-id", successor, "--reuse-contract", provider_backed=True)
+            successor_run = next(p for p in harness.run_directories() if MM.read_json(p / "metadata.json")["workflow_id"] == successor)
+            self.assertEqual(MM.read_json(successor_run / "metadata.json")["required_checks"], ["build", "unit tests"])
+
     def test_mixed_free_form_test_gaps_cannot_silently_disappear(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -10629,7 +10786,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "- Needed test: exercise display\n- Risk: incorrect display\n"
             ))})
             result = harness.cli(
-                repo, "run", "--uncommitted", "--without-claude", "--without-codex",
+                repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", "--without-claude", "--without-codex",
                 "--with-antigravity", "--without-kimi",
                 check=False, provider_backed=True,
             )
@@ -10656,7 +10813,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "report": "Failed to authenticate: OAuth session expired and could not be refreshed",
             })
             result = harness.cli(
-                repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", "--with-claude", "--without-codex",
                 "--without-antigravity", "--without-kimi",
                 check=False, provider_backed=True,
             )
@@ -10680,7 +10837,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     "structured": invalid, "report": structured_report(),
                 })
                 result = harness.cli(
-                    repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                    repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", "--with-claude", "--without-codex",
                     "--without-antigravity", "--without-kimi",
                     check=False, provider_backed=True,
                 )
@@ -10707,7 +10864,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "stderr": "Failed to authenticate: OAuth session expired and could not be refreshed",
             })
             failed = harness.cli(
-                repo, "run", "--uncommitted", "--with-claude", "--without-codex",
+                repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", "--with-claude", "--without-codex",
                 "--without-antigravity", "--without-kimi",
                 check=False, provider_backed=True,
             )
@@ -10743,7 +10900,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 payload["coverage"]["complete"] = "false"
                 harness.queue(provider, {"structured": payload})
                 result = harness.cli(
-                    repo, "run", "--uncommitted", f"--with-{provider}",
+                    repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", f"--with-{provider}",
                     "--without-codex" if provider == "claude" else "--without-claude",
                     "--without-antigravity", "--without-kimi",
                     check=False, provider_backed=True,
@@ -10774,7 +10931,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 {"structured": structured_payload()},
             )
             result = harness.cli(
-                repo, "run", "--uncommitted", "--with-codex", "--without-claude",
+                repo, "run", "--required-check", PASSED_CHECK["name"], "--uncommitted", "--with-codex", "--without-claude",
                 "--without-antigravity", "--without-kimi", "--codex-model", "gpt-6-astra",
                 check=False, provider_backed=True,
             )
@@ -10829,7 +10986,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             ).stdout.strip()
             repair = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--uncommitted",
                 "--workflow-id",
                 workflow,
@@ -11000,7 +11157,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             )
             failed = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--uncommitted",
                 "--workflow-id",
                 workflow,
@@ -11125,7 +11282,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             ).stdout.strip()
             blocked = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--uncommitted",
@@ -11168,7 +11325,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             harness.queue("claude", {"kind": "report", "report": structured_report()})
             completed = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--uncommitted",
@@ -11250,7 +11407,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             ).stdout.strip()
             partial = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--uncommitted",
@@ -11378,7 +11535,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             harness.queue("claude", {"kind": "malformed_wrapper", "exit_code": 0})
             malformed = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--workflow-id",
@@ -11423,7 +11580,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             )
             invalid = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--workflow-id",
@@ -11490,7 +11647,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             harness.queue("claude", {"kind": "budget_exhausted"})
             exhausted = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--workflow-id",
@@ -11785,7 +11942,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             ]
             blocked = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 *common,
                 "--workflow-id",
                 workflow_identifier,
@@ -11841,7 +11998,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             harness.queue("claude", {"kind": "report", "report": structured_report()})
             reviewed = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 *common,
                 "--workflow-id",
                 workflow_identifier,
@@ -12065,7 +12222,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             ).stdout.strip()
             external_block = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--uncommitted",
@@ -12233,7 +12390,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             )
             initial = harness.cli(
                 repo,
-                "run",
+                "run", "--required-check", PASSED_CHECK["name"],
                 "--repo",
                 str(repo),
                 "--uncommitted",
@@ -12443,7 +12600,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             for drift in drift_commands:
                 blocked = harness.cli(
                     repo,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--workflow-id",
@@ -12592,6 +12749,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 if phase == "repair" and not reuse_lineage:
                     arguments.extend(
                         [
+                            "--required-check", PASSED_CHECK["name"],
                             "--uncommitted",
                             "--path",
                             "src/feature.py",
@@ -12972,7 +13130,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             blocked_repair = artifact_dir(
                 harness.cli(
                     repos[0],
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repos[0]),
                     "--uncommitted",
@@ -13096,7 +13254,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--workflow-id",
                     workflow_identifier,
                     "--path",
@@ -13262,7 +13420,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(SCRIPT_PATH),
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--commit",
@@ -13353,7 +13511,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(SCRIPT_PATH),
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--base",
@@ -13456,7 +13614,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             reviewed = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -13475,7 +13633,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             reused = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -13550,7 +13708,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--workflow-id",
@@ -13648,7 +13806,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             completed = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -13685,7 +13843,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             blocked_round = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -13998,7 +14156,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             blocked = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -14111,7 +14269,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             initial = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--path",
@@ -14214,7 +14372,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             initial = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--workflow-id",
@@ -14407,7 +14565,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             initial = run(
                 [
                     *base,
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--workflow-id",
@@ -14560,7 +14718,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(SCRIPT_PATH),
-                    "run",
+                    "run", "--required-check", PASSED_CHECK["name"],
                     "--repo",
                     str(repo),
                     "--uncommitted",
