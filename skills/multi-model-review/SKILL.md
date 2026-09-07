@@ -324,6 +324,7 @@ final verdict.
 ```bash
 mm-review finalize --run <run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<final review result>" \
   --verification "<command/check: result>"
 mm-review verify --run <run-dir>
@@ -335,6 +336,7 @@ checked-out-HEAD attestation, and workflow closure:
 ```bash
 mm-review gate <workflow-id> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<evidence-backed final review>" \
   --verification "<command/check: result>" \
   --attest-commit
@@ -344,6 +346,29 @@ Without a Codex verdict it reports `NEEDS_CODEX_FINAL`; without a mandatory
 confirmation it reports the exact `continue` action. `gate` does not invoke a
 provider unless `--execute-review` is explicitly supplied.
 
+Before any passing final or commit/push handoff, run the required repository and
+CI checks against the final combined branch, including changes integrated from
+the remote. Record every required check with `--check-result` JSON containing
+`name`, `status` (`passed`, `failed`, or `not_run`), `exit_code` (integer, or null
+for `not_run`), and concrete non-secret `evidence`. Names must be unique; report
+the latest result for each check. A passing check requires exit code zero.
+Failed, unrun, or missing check results force `BLOCK`, even when Codex or all
+reviewers say PASS. `--verification` is supplemental prose, not a passing check.
+
+An existing failure is still a failed required check. Do not defer, relabel, or
+omit a known failure because it predates the patch or falls outside `--path`.
+Fix it when authorized and practical, or report the blocked handoff. Run the
+full required test suite when feasible; focused tests and green lint cannot
+establish a green suite. Static reviewers cannot certify tests they did not run.
+After pushing, inspect CI for the pushed SHA and report pending/failed checks
+separately from local checks. A push or review PASS never proves CI success.
+
+The runner validates controller-reported check results; it does not execute the
+commands or independently discover omitted CI jobs. Codex remains responsible
+for truthful results and complete required-check selection. Historical finals
+without structured validation remain readable but cannot establish readiness;
+refinalize unchanged reviewed source with fresh check results before attestation.
+
 If a successful confirmation reviewer explicitly reports incomplete coverage,
 finalization fails closed. Run another independent review, or inspect every
 named path and limitation yourself and persist concrete compensation:
@@ -351,6 +376,7 @@ named path and limitation yourself and persist concrete compensation:
 ```bash
 mm-review finalize --run <run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<final review result>" \
   --verification "<command/check: result>" \
   --coverage-verification "Read <paths> fully and traced <call paths>: <result>"
@@ -417,6 +443,7 @@ mm-review run --supplemental-of <finalized-run-dir> \
   --task "<focused additional concern>"
 mm-review finalize --run <supplemental-run-dir> \
   --codex-verdict <PASS_CLEAN|PASS_WITH_FINDINGS|BLOCK> \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "<focused Codex verification>"
 mm-review verify --run <supplemental-run-dir>
 ```

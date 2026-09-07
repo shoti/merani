@@ -32,6 +32,11 @@ import evidence_memory as EM
 import assurance as AM
 import review_contract as RC
 
+PASSED_CHECK = {
+    "name": "fixture regression suite", "status": "passed",
+    "exit_code": 0, "evidence": "Isolated fake-provider fixture verification passed.",
+}
+
 
 def run(
     command: list[str],
@@ -1440,7 +1445,7 @@ class RunnerUnitTests(unittest.TestCase):
             self.assertNotIn("unnecessary provider prose", raw)
             self.assertTrue((run_dir / "assurance.md").is_file())
 
-    def test_legacy_artifacts_remain_trusted_but_unassured(self) -> None:
+    def test_legacy_artifacts_without_check_results_are_not_ready(self) -> None:
         legacy_final = {
             "schema_version": 11,
             "codex_verdict": "PASS_CLEAN",
@@ -1448,7 +1453,8 @@ class RunnerUnitTests(unittest.TestCase):
             "triage_sha256s": {"run-one": "a" * 64},
         }
         trusted, issues = MM.final_contract_trust(legacy_final)
-        self.assertTrue(trusted, issues)
+        self.assertFalse(trusted)
+        self.assertTrue(any("structured validation is missing" in issue for issue in issues))
         self.assertFalse(
             MM.final_assurance_is_fresh(
                 Path("/private/tmp/run"), {}, legacy_final
@@ -1498,6 +1504,7 @@ class RunnerUnitTests(unittest.TestCase):
             MM.safe_write_json(run_dir / "assurance.json", document)
             args = argparse.Namespace(
                 run=str(run_dir),
+                check_result=[json.dumps(PASSED_CHECK)],
                 codex_verdict="PASS_CLEAN",
                 codex_review="Verified the exact invariant.",
                 verification=[],
@@ -1560,6 +1567,7 @@ class RunnerUnitTests(unittest.TestCase):
             )
             args = argparse.Namespace(
                 run=str(run_dir),
+                check_result=[json.dumps(PASSED_CHECK)],
                 codex_verdict="PASS_CLEAN",
                 codex_review="Legacy evidence remains unchanged.",
                 verification=[],
@@ -3519,6 +3527,8 @@ class RunnerUnitTests(unittest.TestCase):
             [
                 "gate",
                 "wf-test",
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -3628,6 +3638,7 @@ class RunnerUnitTests(unittest.TestCase):
                 events.append("finalize")
                 self.assertEqual(args.codex_verdict, "PASS_CLEAN")
                 self.assertEqual(args.verification, ["131 tests passed"])
+                self.assertEqual(args.check_result, [json.dumps(PASSED_CHECK)])
                 MM.safe_write_json(
                     run_dir / "final.json", {"status": "PASS_CLEAN"}
                 )
@@ -3649,6 +3660,8 @@ class RunnerUnitTests(unittest.TestCase):
                 [
                     "gate",
                     "wf-test",
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -6001,6 +6014,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -6024,6 +6039,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -6143,6 +6160,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-attest": "a" * 64},
+                    "validation": MM.evaluate_checks([PASSED_CHECK]),
                 },
             )
 
@@ -7264,6 +7282,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-one": "a" * 64},
+                    "validation": MM.evaluate_checks([PASSED_CHECK]),
                     "assurance": {
                         "classification": "legacy_unassured",
                         "status": "NOT_EVALUATED",
@@ -8950,6 +8969,7 @@ None.
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-final": "a" * 64},
+                    "validation": MM.evaluate_checks([PASSED_CHECK]),
                 },
             )
             MM.safe_write_json(
@@ -9243,6 +9263,7 @@ None.
                 "codex_verdict": "PASS_CLEAN",
                 "triage_status": "PASS_CLEAN",
                 "triage_sha256s": {"run-done": "a" * 64},
+                "validation": MM.evaluate_checks([PASSED_CHECK]),
             }
             MM.safe_write_json(
                 workflows / "wf-done.json",
@@ -9282,6 +9303,92 @@ None.
             self.assertTrue(status["repositories"][0]["final_contract_trusted"])
             self.assertEqual(artifact_bytes.call_count, 1)
 
+    def test_failed_suite_in_prose_cannot_pass_without_structured_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            MM.safe_write_json(run_dir / "metadata.json", {
+                "run_id": "run-failed-suite", "status": "completed",
+                "phase": "confirmation", "source_fingerprint": "same", "risks": [],
+            })
+            MM.safe_write_json(run_dir / "triage.json", {"findings": [], "test_gaps": []})
+            args = MM.build_parser().parse_args([
+                "finalize", "--run", str(run_dir),
+                "--codex-verdict", "PASS_WITH_FINDINGS",
+                "--codex-review", "Existing suite failure was treated as unrelated.",
+                "--verification", "npm test: 1614 passing, 4 pending, 1 failing (pre-existing)",
+            ])
+            with mock.patch.object(MM, "freshness_status", return_value={
+                "fresh": True, "mode": "working-tree"
+            }):
+                self.assertEqual(MM.finalize_command(args), 3)
+            self.assertEqual(MM.read_json(run_dir / "final.json")["status"], "BLOCK")
+
+    def test_required_checks_control_finalize_and_committed_readiness(self) -> None:
+        for status, exit_code, expected in [
+            ("passed", 0, "PASS_CLEAN"),
+            ("failed", 1, "BLOCK"),
+            ("not_run", None, "BLOCK"),
+        ]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                run_dir = Path(temporary)
+                MM.safe_write_json(run_dir / "metadata.json", {
+                    "run_id": "run-checks", "status": "completed",
+                    "phase": "confirmation", "source_fingerprint": "same", "risks": [],
+                })
+                MM.safe_write_json(run_dir / "triage.json", {"findings": [], "test_gaps": []})
+                check = {"name": "npm test", "status": status,
+                         "exit_code": exit_code, "evidence": "Full required suite result."}
+                args = MM.build_parser().parse_args([
+                    "finalize", "--run", str(run_dir),
+                    "--codex-verdict", "PASS_CLEAN", "--codex-review", "Source reviewed.",
+                    "--check-result", json.dumps(PASSED_CHECK),
+                    "--check-result", json.dumps(check),
+                ])
+                with mock.patch.object(MM, "freshness_status", return_value={
+                    "fresh": True, "mode": "committed-equivalent", "commit": "a" * 40,
+                }), mock.patch.object(MM, "review_binding", return_value=("attested_commit", True)):
+                    self.assertEqual(MM.finalize_command(args), 0 if expected == "PASS_CLEAN" else 3)
+                    final = MM.read_json(run_dir / "final.json")
+                    self.assertEqual(final["status"], expected)
+                    self.assertEqual(final["validation"]["checks"][1], check)
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        result = MM.verify_command(argparse.Namespace(run=str(run_dir)))
+                    self.assertEqual(result, 0 if expected == "PASS_CLEAN" else 3)
+                    self.assertEqual(json.loads(output.getvalue())["deployment_ready"], expected == "PASS_CLEAN")
+
+    def test_check_results_reject_malformed_or_contradictory_evidence(self) -> None:
+        for checks in [
+            None, {}, [None], [dict(PASSED_CHECK, status="unknown")],
+            [dict(PASSED_CHECK, status=False)], [dict(PASSED_CHECK, exit_code=True)],
+            [dict(PASSED_CHECK, exit_code=1)], [dict(PASSED_CHECK, status="failed")],
+            [dict(PASSED_CHECK, evidence=" ")], [dict(PASSED_CHECK, required=False)],
+            [PASSED_CHECK, dict(PASSED_CHECK, name=PASSED_CHECK["name"].upper())],
+        ]:
+            with self.subTest(checks=checks), self.assertRaises(MM.ValidationError):
+                MM.evaluate_checks(checks)
+
+    def test_passing_final_cannot_hide_a_failed_check_or_forged_summary(self) -> None:
+        failed = dict(PASSED_CHECK, status="failed", exit_code=1)
+        final = {
+            "schema_version": 13, "status": "PASS_WITH_FINDINGS",
+            "codex_verdict": "PASS_WITH_FINDINGS", "triage_status": "PASS_CLEAN",
+            "triage_sha256s": {"run-one": "a" * 64},
+            "assurance": {"classification": "no_explicit_claims", "status": "PASS_CLEAN"},
+            "validation": MM.evaluate_checks([failed]),
+        }
+        self.assertFalse(MM.final_contract_trust(final)[0])
+        final["validation"]["status"] = "PASS_CLEAN"
+        self.assertFalse(MM.final_contract_trust(final)[0])
+
+    def test_check_result_json_cannot_overwrite_a_failed_status(self) -> None:
+        with self.assertRaisesRegex(MM.ValidationError, "duplicate fields"):
+            MM.parse_check_result(
+                '{"name":"npm test","status":"failed","status":"passed",'
+                '"exit_code":0,"evidence":"Contradictory result"}'
+            )
+
+
     def test_codex_block_overrides_clean_reviewer_triage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -9304,6 +9411,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "BLOCK",
                     "--codex-review",
@@ -9366,6 +9475,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -9418,6 +9529,8 @@ None.
                     "finalize",
                     "--run",
                     str(alias_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -9513,6 +9626,8 @@ None.
                     "finalize",
                     "--run",
                     str(confirmation_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -9609,6 +9724,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -10139,6 +10256,8 @@ None.
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -10724,6 +10843,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -10763,6 +10884,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -11479,6 +11602,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -11817,6 +11942,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -11832,6 +11959,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -12315,6 +12444,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(confirmation_dir),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -12486,6 +12617,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(repo_one_final),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_WITH_FINDINGS",
                 "--codex-review",
@@ -12498,6 +12631,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(repo_two_final),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -12686,6 +12821,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(successor_one_final),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_WITH_FINDINGS",
                 "--codex-review",
@@ -12723,6 +12860,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(successor_two_final),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "PASS_CLEAN",
                 "--codex-review",
@@ -12808,6 +12947,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 "finalize",
                 "--run",
                 str(blocked_confirmation),
+                "--check-result",
+                json.dumps(PASSED_CHECK),
                 "--codex-verdict",
                 "BLOCK",
                 "--codex-review",
@@ -12950,6 +13091,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                     "finalize",
                     "--run",
                     str(confirmation_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -12985,6 +13128,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                     "finalize",
                     "--run",
                     str(supplemental_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -13571,6 +13716,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",
@@ -13667,12 +13814,41 @@ class RunnerEndToEndTests(unittest.TestCase):
                 ]
                 run(command, cwd=repo, env=environment)
 
+            failed_check = dict(
+                PASSED_CHECK, name="required full suite", status="failed", exit_code=1,
+                evidence="One pre-existing failure outside the scoped diff remains.",
+            )
+            blocked_checks = run(
+                [
+                    *base, "finalize", "--run", str(run_dir),
+                    "--codex-verdict", "PASS_WITH_FINDINGS",
+                    "--codex-review", "Reviewer triage is clean; suite failure is pre-existing.",
+                    "--check-result", json.dumps(PASSED_CHECK),
+                    "--check-result", json.dumps(failed_check),
+                ], cwd=repo, env=environment, check=False,
+            )
+            self.assertEqual(blocked_checks.returncode, 3)
+            self.assertEqual(MM.read_json(run_dir / "final.json")["status"], "BLOCK")
+            check_verification = run(
+                [*base, "verify", "--run", str(run_dir)],
+                cwd=repo, env=environment, check=False,
+            )
+            self.assertEqual(check_verification.returncode, 3)
+            self.assertFalse(json.loads(check_verification.stdout)["deployment_ready"])
+            check_workflow = run(
+                [*base, "workflow", "status", metadata["workflow_id"]],
+                cwd=repo, env=environment, check=False,
+            )
+            self.assertFalse(json.loads(check_workflow.stdout)["ready"])
+
             finalized = run(
                 [
                     *base,
                     "finalize",
                     "--run",
                     str(run_dir),
+                    "--check-result",
+                    json.dumps(PASSED_CHECK),
                     "--codex-verdict",
                     "PASS_CLEAN",
                     "--codex-review",

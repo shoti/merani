@@ -31,6 +31,7 @@ import time
 import traceback
 import uuid
 from typing import Any, Iterable, Sequence
+from validation import ValidationError, evaluate_checks, parse_check_result
 
 from assurance import (
     AssuranceError,
@@ -187,7 +188,7 @@ CODEX_REVIEW_MCP_IGNORED_DIRS = {
 }
 LEGACY_PROVIDER_ALIASES = {"gemini": "antigravity"}
 PROVIDER_CHOICES = (*PROVIDERS, *LEGACY_PROVIDER_ALIASES)
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 MAX_REPAIR_ROUNDS = 3
 RUN_PHASES = ("repair", "confirmation", "supplemental")
 DEFAULT_REVIEW_MODE = "balanced"
@@ -7027,6 +7028,7 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 "triage_fresh": triage_fresh,
                 "assurance_fresh": assurance_fresh,
                 "assurance": assurance_summary,
+                "validation": final.get("validation") if final_path.exists() else None,
                 "final_contract_trusted": final_contract_trusted,
                 "final_contract_issues": final_contract_issues,
                 "commit": commit,
@@ -7937,6 +7939,8 @@ def gate_command(args: argparse.Namespace) -> int:
             ]
             for verification in args.verification:
                 command.extend(["--verification", verification])
+            for check in args.check_result:
+                command.extend(["--check-result", check])
             for verification in args.coverage_verification:
                 command.extend(["--coverage-verification", verification])
             output = io.StringIO()
@@ -9438,6 +9442,20 @@ def final_contract_trust(final: dict[str, Any]) -> tuple[bool, list[str]]:
             "NOT_EVALUATED",
         }:
             issues.append("assurance status is missing or invalid")
+    validation = final.get("validation")
+    if not isinstance(validation, dict):
+        issues.append("structured validation is missing; refinalize with --check-result")
+    else:
+        try:
+            expected_validation = evaluate_checks(validation.get("checks"))
+            if validation != expected_validation:
+                issues.append("structured validation summary does not match check results")
+            if expected_validation["status"] == "BLOCK" and str(final.get("status")) not in {
+                "BLOCK", "SUPPLEMENTAL_BLOCK"
+            }:
+                issues.append("failed, unrun or missing required checks cannot carry a passing final")
+        except ValidationError as exc:
+            issues.append(str(exc))
     return not issues, issues
 
 
@@ -9635,6 +9653,17 @@ def finalize_command(args: argparse.Namespace) -> int:
     codex_review = args.codex_review.strip()
     codex_verdict = str(args.codex_verdict)
     verification = [item.strip() for item in args.verification if item.strip()]
+    try:
+        checks = [parse_check_result(item) for item in getattr(args, "check_result", [])]
+        validation = evaluate_checks(checks)
+    except (ValueError, TypeError) as exc:
+        raise ReviewError(f"Invalid --check-result: {exc}") from exc
+    if any(
+        assurance_text_is_sensitive(check[field])
+        for check in validation["checks"]
+        for field in ("name", "evidence")
+    ):
+        raise ReviewError("Check results must not contain secret-like content")
     coverage_verification = [
         item.strip()
         for item in getattr(args, "coverage_verification", [])
@@ -9643,7 +9672,7 @@ def finalize_command(args: argparse.Namespace) -> int:
     if not codex_review:
         raise ReviewError("--codex-review cannot be empty.")
     risky = bool(metadata.get("risks"))
-    if risky and not verification:
+    if risky and not verification and not validation["checks"]:
         raise ReviewError(
             "At least one --verification is required for a risk-profiled review."
         )
@@ -9736,7 +9765,7 @@ def finalize_command(args: argparse.Namespace) -> int:
         [item for item, _, _ in history_findings],
         [item for item, _, _ in history_test_gaps],
     )
-    gate_inputs = [triage_status, codex_verdict]
+    gate_inputs = [triage_status, codex_verdict, validation["status"]]
     if assurance_status in GATE_STATUSES:
         gate_inputs.append(assurance_status)
     gate_status = conservative_gate_status(*gate_inputs)
@@ -9781,6 +9810,7 @@ def finalize_command(args: argparse.Namespace) -> int:
         "codex_verdict": codex_verdict,
         "codex_review": codex_review,
         "verification": verification,
+        "validation": validation,
         "review_coverage": {
             "provider_complete": not incomplete_coverage,
             "incomplete_reviewers": incomplete_coverage,
@@ -9882,6 +9912,7 @@ def verify_command(args: argparse.Namespace) -> int:
                 "final_contract_trusted": final_contract_trusted,
                 "final_contract_issues": final_contract_issues,
                 "freshness_mode": freshness["mode"],
+                "validation": final.get("validation"),
                 "commit": commit,
                 "binding": binding,
                 "commit_bound": commit_bound,
@@ -12114,6 +12145,10 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--codex-verdict", choices=GATE_STATUSES)
     gate.add_argument("--codex-review")
     gate.add_argument("--verification", action="append", default=[])
+    gate.add_argument(
+        "--check-result", action="append", default=[],
+        help="JSON required-check result: name, status (passed/failed/not_run), exit_code, evidence; repeat for every check",
+    )
     gate.add_argument("--coverage-verification", action="append", default=[])
     gate.add_argument(
         "--attest-commit",
@@ -12537,6 +12572,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     finalize.add_argument("--codex-review", required=True)
+    finalize.add_argument(
+        "--check-result", action="append", default=[],
+        help="JSON required-check result: name, status (passed/failed/not_run), exit_code, evidence; missing or unsuccessful checks block PASS",
+    )
     finalize.add_argument(
         "--verification",
         action="append",

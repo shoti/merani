@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Require structured required-check results for a passing final. Failed, unrun
+  and missing checks block readiness even with passing review verdicts, including
+  pre-existing suite failures. Verification prose remains supplemental evidence.
+- Validate check outcomes again during final verification and workflow readiness;
+  historical finals without structured results are readable but not readiness proof.
+- Document final-branch and post-push CI verification responsibilities.
+
 All notable user-visible changes are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
