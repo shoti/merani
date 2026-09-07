@@ -10213,13 +10213,6 @@ def apply_reviewer_artifact_archive_plan(
             reviewer[field] = archived_names[current]
 
 
-def archive_reviewer_artifacts(
-    run_dir: Path, name: str, reviewer: dict[str, Any]
-) -> None:
-    plan = reviewer_artifact_archive_plan(run_dir, name, reviewer)
-    apply_reviewer_artifact_archive_plan(reviewer, plan)
-
-
 def archive_reviewer_artifacts_batch(
     run_dir: Path,
     names: Sequence[str],
