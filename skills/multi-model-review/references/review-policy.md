@@ -112,6 +112,17 @@ numeric confidence score or count model agreement as evidence. Contract drift
 requires an explicit linked successor, and legacy artifacts remain honestly
 unassured rather than receiving synthesized claim coverage.
 
+## Required check results
+
+Known required test, build, lint or CI failures block handoff even if they are
+pre-existing or outside the scoped diff. They are failed checks, not deferrable
+review findings. Capture every required check with the structured `--check-result`
+contract; failed, unrun or missing results force `BLOCK`. Verification prose alone
+cannot establish readiness. Run the final combined branch and inspect CI for the
+pushed SHA. Report local results, pending CI and deployment evidence separately.
+A reviewer without terminal access provides static review only. The controller
+must not infer a green suite from reviewer agreement or focused tests.
+
 ## Convergence gate
 
 Run another external round when an accepted blocker/high finding caused code to

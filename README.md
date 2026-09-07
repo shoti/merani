@@ -477,6 +477,7 @@ final diff review, consolidate the final gate:
 ```bash
 python3 "$RUNNER" gate <workflow-id> \
   --codex-verdict PASS_CLEAN \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "Final diff review found no remaining defect." \
   --verification "Focused tests: passed" \
   --attest-commit
@@ -491,12 +492,26 @@ python3 "$RUNNER" run --repo /path/to/repository \
 python3 "$RUNNER" finalize \
   --run <confirmation-run-directory> \
   --codex-verdict PASS_CLEAN \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "Final diff review found no remaining defect." \
   --verification "Focused tests: passed"
 
 python3 "$RUNNER" verify --run <confirmation-run-directory>
 python3 "$RUNNER" workflow finalize <workflow-id>
 ```
+
+Required checks now have structured results. Pass one `--check-result` JSON
+object per required check, with `name`, `status` (`passed`, `failed`, `not_run`),
+`exit_code` (zero for passed, nonzero for failed, null for not_run), and `evidence`.
+Missing results or any failed/unrun check force `BLOCK`; prose `--verification`
+and `PASS_WITH_FINDINGS` cannot override that. Existing failures count, including
+failures outside the review path filter. Report all required local/CI checks;
+the runner validates reports but does not execute commands or discover omitted
+checks. A local passing gate is not proof of successful remote CI.
+
+Historical finals without structured validation remain inspectable but are no
+longer readiness evidence. Refinalize unchanged confirmed source with current
+check results; do not manufacture results for old runs.
 
 `workflow status` reports both `ready` and `deployment_ready`. A clean working
 tree review proves the local source gate only. After committing the exact bytes,
@@ -533,6 +548,7 @@ python3 "$RUNNER" run \
 python3 "$RUNNER" finalize \
   --run <supplemental-run-directory> \
   --codex-verdict PASS_CLEAN \
+  --check-result '{"name":"required tests","status":"passed","exit_code":0,"evidence":"Full required suite passed on the reviewed source."}' \
   --codex-review "Focused recheck result"
 python3 "$RUNNER" verify --run <supplemental-run-directory>
 ```
