@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shoti/merani/reflection.schema.json",
+  "title": "Merani private run reflection v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "operation",
+    "run",
+    "identity",
+    "evidence_inputs",
+    "bindings",
+    "outcomes",
+    "evidence_completeness",
+    "metrics",
+    "went_well",
+    "struggles",
+    "actionable_insights",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": "merani-reflection-v1"},
+    "generated_at": {"type": "string"},
+    "operation": {"type": "string"},
+    "run": {"type": "object"},
+    "identity": {"type": "object"},
+    "evidence_inputs": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "bindings": {"type": "object"},
+    "outcomes": {
+      "type": "object",
+      "required": ["execution", "gate", "confirmation", "freshness"]
+    },
+    "evidence_completeness": {
+      "type": "object",
+      "required": ["complete_for_available_phase", "missing_inputs", "corrupt_inputs", "limitations"]
+    },
+    "metrics": {"type": "object"},
+    "went_well": {"$ref": "#/$defs/entries"},
+    "struggles": {"$ref": "#/$defs/entries"},
+    "actionable_insights": {"$ref": "#/$defs/entries"},
+    "authority": {
+      "type": "object",
+      "required": ["advisory_only", "changes_gate", "sent_to_reviewers"],
+      "properties": {
+        "advisory_only": {"const": true},
+        "changes_gate": {"const": false},
+        "sent_to_reviewers": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "basis", "claim", "evidence", "next_check"],
+        "properties": {
+          "basis": {"enum": ["observation", "inference"]},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

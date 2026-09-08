@@ -33,6 +33,8 @@ def dispatch(args: argparse.Namespace, handlers: Mapping[str, Handler]) -> int:
         key = f"memory.{args.memory_command}"
         if args.memory_command == "search" and not 0 <= args.minimum_similarity <= 1:
             raise ReviewError("--minimum-similarity must be between 0 and 1.")
+    elif key == "reflection":
+        key = f"reflection.{args.reflection_command}"
     elif key == "workflow":
         key = f"workflow.{args.workflow_command}"
     elif key == "resume":

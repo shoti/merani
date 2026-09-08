@@ -1,0 +1,11 @@
+{
+  "schema_version": "merani-campaign-scenarios-v1",
+  "quick": [
+    {"id": "clean-gate", "version": 1, "expected": "completed workflow with fresh verification and commit binding"},
+    {"id": "logged-out", "version": 1, "expected": "preflight block with no provider invocation"},
+    {"id": "malformed-resume", "version": 1, "expected": "typed failure followed by one eligible successful retry"},
+    {"id": "invalid-utf8", "version": 1, "expected": "failed review with bounded diagnostic evidence"},
+    {"id": "seeded-defect", "version": 1, "expected": "queued finding matches independent failing oracle and remains explicitly triaged"},
+    {"id": "multi-repository-incomplete", "version": 1, "expected": "one successful repository cannot close an incomplete workflow"}
+  ]
+}

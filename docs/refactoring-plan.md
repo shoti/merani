@@ -44,6 +44,7 @@ tests:
 | decision and assurance recording | planned `application/decisions.py` | current atomic writes unchanged |
 | finalization/attestation | policy extracted; orchestration planned in `application/finalization.py` | current lock/freshness order unchanged |
 | analytics aggregation/rendering | planned application/presentation split | current output snapshots unchanged |
+| evidence-based run reflection | `domain/reflection.py`, `adapters/reflection.py` | derived private artifacts never enter gates or reviewer inputs |
 
 Temporary launcher wrappers may be removed only after tests import the owning
 module directly, a behavior-level launcher test covers the public command, and

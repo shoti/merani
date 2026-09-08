@@ -72,12 +72,14 @@ skills/merani/scripts/
       models.py, errors.py
       assurance.py, review_contract.py, validation.py
       workflow_policy.py, budget_policy.py, gate_policy.py, metrics.py
+      reflection.py                  pure post-run feedback calculation
     application/
       ports.py                     narrow external-capability protocols
       query_session.py             command-scoped read cache
       workflows.py                 read-only continuation planning
     adapters/
       storage.py, locking.py, storage_metrics.py, evidence_memory.py
+      reflection.py                 bounded reads and atomic publication
       providers/
         registry.py, claude.py, codex.py, antigravity.py, kimi.py
     presentation/
@@ -161,6 +163,20 @@ as review signals. They do not fail the build or encourage meaningless splits.
   attempt with raw evidence preserved.
 - Tests: fake provider command, malformed stream/report, timeout, cancellation,
   auth, quota, and resume tests; focused decoder tests.
+
+### Reflection
+
+- `domain/reflection.py` calculates versioned advisory feedback from parsed
+  artifacts and has no filesystem, process, environment, network, or gate write.
+- `adapters/reflection.py` reads only named bounded regular JSON files without
+  following symlinks, checks input hashes twice, and atomically publishes private
+  JSON and Markdown.
+- Launcher lifecycle owners refresh after terminal persistence, cleanup and
+  reservation release, plus successful triage, assurance, final, verification,
+  recovery, attestation, gate, and workflow closure updates.
+- Reflection does not participate in fingerprints, reviewer prompts, report-byte
+  metrics, triage, assurance, finalization, or workflow policy. Publication
+  failures warn and preserve the primary exit status.
 
 ### Presentation
 
@@ -314,6 +330,7 @@ and usage. Paid repeated trials require separate authorization and are not a
 | Final-gate policy | `domain/gate_policy.py` | core policy and final-contract tests; no provider needed |
 | Private artifact semantics | `adapters/storage.py`, `adapters/locking.py` | atomicity, permissions, concurrency tests |
 | Assurance/report/check contract | corresponding `domain/` module | legacy facade plus focused contract tests |
+| Post-run reflection calculation/publication | `domain/reflection.py`, `adapters/reflection.py` | `tests/unit/test_reflection.py`, offline campaign |
 
 A provider parsing edit should normally touch one provider adapter and its
 tests. A rendering edit should remain in presentation code. A gate-policy edit
