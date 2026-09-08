@@ -62,3 +62,8 @@ an end hook. If durable state exists, `reflection regenerate` reconstructs an
 explicit interrupted/unknown view from what is present; it does not fabricate a
 successful outcome. If the reflection directory is unwritable, automatic retry
 does not recurse and an older file must pass the `show` hash check before display.
+
+Merani does not currently prune ordinary run directories or evidence-memory
+records automatically. `memory compact` compacts the SQLite file but does not
+apply a retention policy. Operators must include the configured private run and
+evidence-memory locations in their own retention process.
