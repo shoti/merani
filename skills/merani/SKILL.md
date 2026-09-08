@@ -135,6 +135,12 @@ read [recovery.md](references/recovery.md) for these cases.
 - Commit binding does not prove deployment or runtime behavior. Preserve the
   user's approval boundaries for commits, pushes, PRs, deployment, and side effects.
   For an authorized Git handoff, read [github-handoff.md](references/github-handoff.md).
+- Treat `review_commit_ready` as local review and commit-binding evidence.
+  `deployment_ready` is a deprecated compatibility field and remains false.
+- New artifacts use versioned framed source/content fingerprints, a shipped
+  bundle digest, and launch-time provider receipts. Historical artifacts remain
+  readable, but legacy content hashes alone cannot establish byte equivalence
+  for a new attestation or supplemental review.
 
 ## Return a useful result
 

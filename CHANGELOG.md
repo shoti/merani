@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Prepare the 1.0 stability contract: versioned unambiguous source/content
+  fingerprints, independent entry manifests for commit equivalence, strict
+  persisted-final validation, and conservative rejection of insufficient
+  legacy equivalence evidence. Reject unsupported directory and special-file
+  task entries instead of collapsing them into one empty-content identity.
+- Write provider attempt receipts before launch and settle them independently
+  of later source or report failures. Unify run/resume cancellation, terminate
+  owned descendants within a bounded grace period, preserve completed peers,
+  and retain private bounded diagnostics for malformed or truncated output.
+  Drain every provider through bounded pipes and stop owned process groups when
+  either stream exceeds its limit, so temporary storage cannot grow unchecked.
+  Serialize error and terminal metadata updates with attempt receipts so a
+  concurrent whole-document write cannot erase a provider settlement.
+- Enforce the three-tool filesystem MCP JSON-RPC and input contracts with
+  bounded work, truthful incomplete-search/read results, and private receipts
+  that feed the final coverage gate. Require Claude CLI 2.1.248+ restricted
+  evaluation mode, filter each provider environment, and publish support
+  boundaries through `doctor`.
+- Add deterministic bundle identity across executable modules and policy
+  references while retaining `runner_sha256` meaning. Replace local
+  `deployment_ready` claims with `review_commit_ready`; keep the former as an
+  always-false deprecated alias.
+- Keep commit, push, and pull-request authority separate; run CI for the
+  `shoti/merani-v1-stability-*` handoff branch prefix; and detect package-alias
+  cycles in the architecture guard.
+- Scope Claude authentication evidence to the process boundary: report a
+  sandbox-local `loggedIn: false` result as `boundary_unavailable` instead of
+  claiming that an authenticated host session is logged out.
+- Preserve `USER` in Claude's filtered process environment so macOS account
+  lookup can see the authenticated session without inheriting unrelated
+  credentials.
+
 - Introduce the internal `merani_core` modular-monolith package. Runtime paths,
   pure workflow/budget/gate policy, provider commands and response decoding,
   private storage and locks, query caches, and CLI presentation now have named

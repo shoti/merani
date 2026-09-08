@@ -98,6 +98,12 @@ silently. Either obtain another review or use `--coverage-verification` to
 record concrete Codex inspection of every uncovered path or behavior. A generic
 statement such as "reviewed manually" is not sufficient evidence.
 
+For the bounded Codex filesystem tools, skipped or truncated work is a material
+coverage limitation and must remain visible through confirmation. Resolve it
+with a fresh permitted read/review or concrete `--coverage-verification` tied
+to the same source. Native provider tools do not expose equivalent receipts;
+their byte-level completeness is unknown unless the provider reports a limit.
+
 ## Claim-to-evidence assurance
 
 When a workflow pins acceptance criteria or critical invariants, treat them as

@@ -117,6 +117,7 @@ from merani_core.adapters.locking import (
 )
 from merani_core.adapters.storage import (
     read_json as read_artifact_json,
+    write_bytes as write_artifact_bytes,
     write_json as write_artifact_json,
     write_text as write_artifact_text,
 )
@@ -200,12 +201,64 @@ CODEX_PROCESS_ENVIRONMENT_KEYS = {
     "SYSTEMROOT",
     "TMPDIR",
     "WINDIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+}
+PROVIDER_PROCESS_ENVIRONMENT_KEYS = {
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PATHEXT",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TMPDIR",
+    "USER",
+    "WINDIR",
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    # Offline fake-provider harness only; these names never carry credentials.
+    "MM_FAKE_PROVIDER_LOG",
+    "MM_FAKE_PROVIDER_STATE",
+    "MM_FAKE_CLAUDE_LOGGED_OUT",
+}
+PROVIDER_AUTH_ENVIRONMENT_KEYS = {
+    "claude": {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    },
+    "antigravity": {"GEMINI_API_KEY"},
+    "kimi": {
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "KIMI_CODE_BASE_URL",
+        "KIMI_CODE_EXPERIMENTAL_FLAG",
+        "KIMI_CODE_HOME",
+        "KIMI_CODE_OAUTH_HOST",
+        "KIMI_OAUTH_HOST",
+    },
 }
 CODEX_REVIEW_PROFILE_NAME = "review-files"
 CODEX_REVIEW_MCP_SERVER_NAME = "review_files"
 CODEX_REVIEW_MCP_TOOLS = ("list_directory", "read_file", "search")
 CODEX_REVIEW_MCP_MAX_READ_BYTES = 256 * 1024
 CODEX_REVIEW_MCP_MAX_MATCHES = 200
+CODEX_REVIEW_MCP_MAX_PATH_CHARS = 4_096
+CODEX_REVIEW_MCP_MAX_REQUEST_BYTES = 1024 * 1024
+CODEX_REVIEW_MCP_MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024
+CODEX_REVIEW_MCP_MAX_SEARCH_TOTAL_BYTES = 16 * 1024 * 1024
+CODEX_REVIEW_MCP_MAX_SEARCH_ENTRIES = 10_000
+SUPPORTED_MCP_PROTOCOL_VERSIONS = {"2025-06-18", "2025-11-25"}
 CODEX_REVIEW_MCP_IGNORED_DIRS = {
     ".git",
     ".hg",
@@ -216,7 +269,10 @@ CODEX_REVIEW_MCP_IGNORED_DIRS = {
 }
 LEGACY_PROVIDER_ALIASES = {"gemini": "antigravity"}
 PROVIDER_CHOICES = (*PROVIDERS, *LEGACY_PROVIDER_ALIASES)
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
+SOURCE_FINGERPRINT_VERSION = "source-v3"
+CONTENT_FINGERPRINT_VERSION = "content-v2"
+BUNDLE_IDENTITY_VERSION = "merani-bundle-v1"
 MAX_REPAIR_ROUNDS = 3
 RUN_PHASES = ("repair", "confirmation", "supplemental")
 DEFAULT_REVIEW_MODE = "balanced"
@@ -321,6 +377,8 @@ CODEX_NETWORK_FAILURE_MARKERS = (
     "name or service not known",
     "nodename nor servname provided",
 )
+PROVIDER_STDOUT_LIMIT_BYTES = 2 * 1024 * 1024
+PROVIDER_STDERR_LIMIT_BYTES = 2 * 1024 * 1024
 VALID_RISKS = {
     "auth",
     "backfill",
@@ -347,16 +405,33 @@ DOTENV_ASSIGNMENT_PATTERN = re.compile(
 )
 
 
+def signal_owned_process_group(
+    process: subprocess.Popen[str], sig: signal.Signals
+) -> None:
+    """Signal an owned group while tolerating an exit between poll and kill."""
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        if process.poll() is None:
+            raise
+
+
 class ReviewerProcessRegistry:
     """Track child process groups so a parallel review can be cancelled."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._processes: set[subprocess.Popen[str]] = set()
+        self._cancelled = False
 
-    def add(self, process: subprocess.Popen[str]) -> None:
+    def add(self, process: subprocess.Popen[str]) -> bool:
         with self._lock:
+            if self._cancelled:
+                return False
             self._processes.add(process)
+        return True
 
     def discard(self, process: subprocess.Popen[str]) -> None:
         with self._lock:
@@ -365,11 +440,21 @@ class ReviewerProcessRegistry:
     def signal_all(self, sig: signal.Signals) -> None:
         with self._lock:
             processes = tuple(self._processes)
+        self._signal(processes, sig)
+
+    def cancel(self, sig: signal.Signals) -> None:
+        """Atomically reject later registrations and signal current children."""
+        with self._lock:
+            self._cancelled = True
+            processes = tuple(self._processes)
+        self._signal(processes, sig)
+
+    @staticmethod
+    def _signal(
+        processes: Sequence[subprocess.Popen[str]], sig: signal.Signals
+    ) -> None:
         for process in processes:
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError:
-                continue
+            signal_owned_process_group(process, sig)
 
 
 def utc_now() -> str:
@@ -396,17 +481,57 @@ def runtime_identity(
     *,
     plugin_root: Path | None = None,
     runner_path: Path | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Identify the exact plugin bundle and runner producing an artifact."""
     root = (plugin_root or PLUGIN_ROOT).resolve()
     runner = (runner_path or Path(__file__)).resolve()
     manifest = read_json(root / ".codex-plugin" / "plugin.json")
+    standard_scripts = root / "skills" / "merani" / "scripts"
+    bundle_paths: set[Path] = {root / ".codex-plugin" / "plugin.json", runner}
+    if standard_scripts.is_dir():
+        bundle_scope = "shipped"
+        bundle_paths.update(standard_scripts.rglob("*.py"))
+        for relative in (
+            Path("skills/merani/SKILL.md"),
+            Path("commands/review.md"),
+        ):
+            candidate = root / relative
+            if candidate.is_file():
+                bundle_paths.add(candidate)
+        references = root / "skills" / "merani" / "references"
+        if references.is_dir():
+            bundle_paths.update(path for path in references.rglob("*") if path.is_file())
+    else:
+        bundle_scope = "minimal"
+        core = runner.parent / "merani_core"
+        if core.is_dir():
+            bundle_paths.update(core.rglob("*.py"))
+    entries: list[dict[str, str]] = []
+    for path in sorted(bundle_paths, key=lambda item: item.relative_to(root).as_posix()):
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        entries.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": sha256_file(path),
+            }
+        )
+    encoded_manifest = json.dumps(
+        entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
     return {
         "plugin_name": str(manifest.get("name") or "unknown"),
         "plugin_version": str(manifest.get("version") or "unknown"),
         "plugin_root": str(root),
         "runner_path": str(runner),
         "runner_sha256": sha256_file(runner),
+        "bundle_identity_version": BUNDLE_IDENTITY_VERSION,
+        "bundle_scope": bundle_scope,
+        "bundle_file_count": len(entries),
+        "bundle_manifest": entries,
+        "bundle_sha256": hashlib.sha256(
+            BUNDLE_IDENTITY_VERSION.encode("ascii") + b"\0" + encoded_manifest
+        ).hexdigest(),
     }
 
 
@@ -1505,7 +1630,8 @@ def reusable_lineage_sensitive_approvals(
     approved: set[str] = set()
     source_runs: set[str] = set()
     for _, metadata in workflow_lineage_runs(identifier):
-        if int(metadata.get("schema_version") or 0) < 11:
+        schema_version = metadata.get("schema_version")
+        if type(schema_version) is not int or schema_version < 11:
             continue
         repository = metadata.get("repository")
         if not isinstance(repository, dict) or str(repository.get("id")) != repository_id:
@@ -1537,36 +1663,59 @@ def update_digest_with_paths(
     *,
     include_state: bool,
 ) -> None:
+    """Add canonical, length-framed entry records without following symlinks."""
+    digest.update(b"merani-entry-records\0v2\0")
+
+    def framed(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
     for relative_path in paths:
         path = repo / relative_path
+        path_bytes = relative_path.encode("utf-8", errors="surrogateescape")
+        framed(path_bytes)
         if path.is_symlink():
-            digest.update(relative_path.encode())
-            if include_state:
-                digest.update(b"\0symlink\0")
-            digest.update(os.readlink(path).encode())
+            entry_type = b"symlink"
+            mode = b"-"
+            payload_digest = hashlib.sha256(
+                os.fsencode(os.readlink(path))
+            ).digest()
         elif path.is_file():
-            digest.update(relative_path.encode())
-            if include_state:
-                digest.update(f"\0file:{path.stat().st_mode & 0o777}\0".encode())
+            entry_type = b"file"
+            mode = b"x" if path.stat().st_mode & 0o111 else b"-"
+            content_digest = hashlib.sha256()
             try:
                 with path.open("rb") as changed_file:
                     for chunk in iter(lambda: changed_file.read(1024 * 1024), b""):
-                        digest.update(chunk)
+                        content_digest.update(chunk)
             except OSError as exc:
                 raise ReviewError(f"Cannot fingerprint {path}: {exc}") from exc
-        elif include_state:
-            digest.update(relative_path.encode())
-            digest.update(b"\0missing\0")
+            payload_digest = content_digest.digest()
+        elif path.exists():
+            raise ReviewError(
+                "Unsupported entry type cannot be fingerprinted: "
+                f"{relative_path}"
+            )
+        else:
+            entry_type = b"missing"
+            mode = b"-"
+            payload_digest = hashlib.sha256(b"").digest()
+        framed(entry_type if include_state else b"content")
+        framed(mode if include_state else b"-")
+        framed(payload_digest)
 
 
 def fingerprint_from_patch(
     repo: Path, paths: Sequence[str], patch: str
 ) -> str:
-    """Reproduce the v2 source fingerprint with an already-rendered patch."""
+    """Reproduce the versioned source fingerprint with an already-rendered patch."""
     digest = hashlib.sha256()
-    digest.update(patch.encode())
-    update_digest_with_paths(digest, repo, paths, include_state=False)
-    return digest.hexdigest()
+    digest.update(b"merani-source-fingerprint\0v3\0")
+    patch_bytes = patch.encode("utf-8")
+    digest.update(len(patch_bytes).to_bytes(8, "big"))
+    digest.update(hashlib.sha256(patch_bytes).digest())
+    update_digest_with_paths(digest, repo, paths, include_state=True)
+    return f"{SOURCE_FINGERPRINT_VERSION}:{digest.hexdigest()}"
 
 
 def fingerprint(
@@ -1582,13 +1731,77 @@ def fingerprint(
 
 def content_fingerprint(repo: Path, paths: Sequence[str]) -> str:
     """Hash resulting path contents independently from Git scope state."""
-    digest = hashlib.sha256()
-    update_digest_with_paths(digest, repo, paths, include_state=True)
-    return digest.hexdigest()
+    encoded = json.dumps(
+        content_manifest(repo, paths),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8", errors="surrogateescape")
+    digest = hashlib.sha256(
+        b"merani-content-fingerprint\0v2\0"
+        + len(encoded).to_bytes(8, "big")
+        + encoded
+    )
+    return f"{CONTENT_FINGERPRINT_VERSION}:{digest.hexdigest()}"
+
+
+def content_manifest(repo: Path, paths: Sequence[str]) -> list[dict[str, Any]]:
+    """Describe task entries for an independent exact-entry equivalence check."""
+    entries: list[dict[str, Any]] = []
+    for relative_path in paths:
+        path = repo / relative_path
+        if path.is_symlink():
+            entry_type = "symlink"
+            executable = False
+            content_sha256 = hashlib.sha256(
+                os.fsencode(os.readlink(path))
+            ).hexdigest()
+        elif path.is_file():
+            entry_type = "file"
+            executable = bool(path.stat().st_mode & 0o111)
+            content_sha256 = sha256_file(path)
+        elif path.exists():
+            raise ReviewError(
+                "Unsupported entry type cannot be fingerprinted: "
+                f"{relative_path}"
+            )
+        else:
+            entry_type = "missing"
+            executable = False
+            content_sha256 = hashlib.sha256(b"").hexdigest()
+        entries.append(
+            {
+                "path": relative_path,
+                "entry_type": entry_type,
+                "executable": executable,
+                "content_sha256": content_sha256,
+            }
+        )
+    return entries
+
+
+def result_content_is_equivalent(
+    repo: Path, paths: Sequence[str], metadata: dict[str, Any]
+) -> bool:
+    expected_manifest = metadata.get("result_content_manifest")
+    if isinstance(expected_manifest, list):
+        return content_manifest(repo, paths) == expected_manifest
+    schema_version = metadata.get("schema_version")
+    if type(schema_version) is int and schema_version >= 15:
+        return False
+    expected_content = metadata.get("result_content_fingerprint")
+    return (
+        isinstance(expected_content, str)
+        and content_fingerprint(repo, paths) == expected_content
+    )
 
 
 def safe_write(path: Path, content: str) -> None:
     write_artifact_text(path, content, permission_hint=private_state_permission_hint)
+
+
+def safe_write_bytes(path: Path, content: bytes) -> None:
+    write_artifact_bytes(path, content, permission_hint=private_state_permission_hint)
 
 
 def stage_reviewer_inputs(
@@ -2162,17 +2375,11 @@ def reviewer_definitions(
 def terminate_process_group(
     process: subprocess.Popen[str],
 ) -> tuple[str, str]:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    signal_owned_process_group(process, signal.SIGTERM)
     try:
         return process.communicate(timeout=REVIEWER_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        signal_owned_process_group(process, signal.SIGKILL)
         return process.communicate()
 
 
@@ -2181,24 +2388,36 @@ def communicate_with_codex_network_watch(
     *,
     input_text: str | None,
     timeout_seconds: int,
+    watch_network: bool = True,
 ) -> tuple[str, str, bool, str | None]:
-    """Collect Codex output while failing fast on persistent DNS failures."""
-    stdout_chunks: list[str] = []
-    stderr_chunks: list[str] = []
+    """Collect bounded output and optionally fail fast on Codex DNS failures."""
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    stream_stats = {
+        "stdout": {"bytes": 0, "truncated": False},
+        "stderr": {"bytes": 0, "truncated": False},
+    }
     network_failure_count = 0
     last_network_failure_at = 0.0
     state_lock = threading.Lock()
+    output_limit_hit = threading.Event()
 
     def read_stream(
         stream: Any,
-        chunks: list[str],
+        chunks: list[bytes],
         *,
         observe_network: bool,
+        stream_name: str,
+        byte_limit: int,
     ) -> None:
         nonlocal network_failure_count, last_network_failure_at
-        decoder = codecs.getincrementaldecoder(stream.encoding or "utf-8")(
+        stream_encoding = (
+            stream.encoding if isinstance(stream.encoding, str) else "utf-8"
+        )
+        observer_decoder = codecs.getincrementaldecoder(stream_encoding)(
             errors="replace"
         )
+        captured_bytes = 0
         observed = ""
         complete_failure_count = 0
 
@@ -2208,6 +2427,8 @@ def communicate_with_codex_network_watch(
             if not observe_network:
                 return
             observed += text.lower()
+            if len(observed) > 16_384:
+                observed = observed[-16_384:]
             lines = observed.splitlines(keepends=True)
             if not final and lines and not lines[-1].endswith(("\n", "\r")):
                 observed = lines.pop()
@@ -2232,13 +2453,19 @@ def communicate_with_codex_network_watch(
 
         try:
             while raw := os.read(stream.fileno(), 4096):
-                text = decoder.decode(raw)
-                chunks.append(text)
-                observe(text)
-            trailing = decoder.decode(b"", final=True)
-            if trailing:
-                chunks.append(trailing)
-            observe(trailing, final=True)
+                stream_stats[stream_name]["bytes"] += len(raw)
+                remaining = max(0, byte_limit - captured_bytes)
+                retained = raw[:remaining]
+                if retained:
+                    chunks.append(retained)
+                    captured_bytes += len(retained)
+                if len(raw) > remaining:
+                    stream_stats[stream_name]["truncated"] = True
+                    output_limit_hit.set()
+                observe(observer_decoder.decode(raw))
+                if stream_stats[stream_name]["truncated"]:
+                    break
+            observe(observer_decoder.decode(b"", final=True), final=True)
         finally:
             stream.close()
 
@@ -2246,13 +2473,21 @@ def communicate_with_codex_network_watch(
         threading.Thread(
             target=read_stream,
             args=(process.stdout, stdout_chunks),
-            kwargs={"observe_network": False},
+            kwargs={
+                "observe_network": False,
+                "stream_name": "stdout",
+                "byte_limit": PROVIDER_STDOUT_LIMIT_BYTES,
+            },
             daemon=True,
         ),
         threading.Thread(
             target=read_stream,
             args=(process.stderr, stderr_chunks),
-            kwargs={"observe_network": True},
+            kwargs={
+                "observe_network": watch_network,
+                "stream_name": "stderr",
+                "byte_limit": PROVIDER_STDERR_LIMIT_BYTES,
+            },
             daemon=True,
         ),
     ]
@@ -2281,22 +2516,20 @@ def communicate_with_codex_network_watch(
     forced_failure_category: str | None = None
 
     def stop_process() -> None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        signal_owned_process_group(process, signal.SIGTERM)
         try:
             process.wait(timeout=REVIEWER_TERMINATION_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            signal_owned_process_group(process, signal.SIGKILL)
             process.wait()
 
     try:
         while process.poll() is None:
             now = time.monotonic()
+            if output_limit_hit.is_set():
+                forced_failure_category = "output_truncated"
+                stop_process()
+                break
             with state_lock:
                 persistent_network_failure = (
                     network_failure_count >= CODEX_NETWORK_FAILURE_THRESHOLD
@@ -2312,17 +2545,22 @@ def communicate_with_codex_network_watch(
                 stop_process()
                 break
             time.sleep(0.05)
-    except KeyboardInterrupt:
+    except BaseException:
         stop_process()
         raise
     finally:
         writer.join(timeout=REVIEWER_TERMINATION_GRACE_SECONDS)
         for reader in readers:
             reader.join(timeout=REVIEWER_TERMINATION_GRACE_SECONDS)
-
+        raw_output = {
+            "stdout": b"".join(stdout_chunks),
+            "stderr": b"".join(stderr_chunks),
+        }
+        setattr(process, "_merani_output_diagnostics", stream_stats)
+        setattr(process, "_merani_output_bytes", raw_output)
     return (
-        "".join(stdout_chunks),
-        "".join(stderr_chunks),
+        raw_output["stdout"].decode("utf-8", errors="replace"),
+        raw_output["stderr"].decode("utf-8", errors="replace"),
         timed_out,
         forced_failure_category,
     )
@@ -2343,15 +2581,20 @@ def parse_codex_jsonl(
 
 
 def reviewer_process_environment(reviewer: Reviewer) -> dict[str, str]:
-    """Build the provider process environment with Codex secrets excluded."""
+    """Build a provider-specific environment without unrelated credentials."""
     environment = os.environ.copy()
     environment.update(reviewer.environment)
-    if reviewer.name != "codex":
-        return environment
+    allowed = (
+        CODEX_PROCESS_ENVIRONMENT_KEYS
+        if reviewer.name == "codex"
+        else PROVIDER_PROCESS_ENVIRONMENT_KEYS
+        | PROVIDER_AUTH_ENVIRONMENT_KEYS.get(reviewer.name, set())
+    )
+    allowed = allowed | {key.upper() for key in reviewer.environment}
     return {
         key: value
         for key, value in environment.items()
-        if key.upper() in CODEX_PROCESS_ENVIRONMENT_KEYS
+        if key.upper() in allowed
     }
 
 
@@ -2366,12 +2609,15 @@ def codex_review_profile(
     *,
     workspace_roots: Sequence[Path],
     credential_store: str,
+    coverage_log: Path | None = None,
 ) -> str:
     roots = list(dict.fromkeys(str(path.resolve()) for path in workspace_roots))
     root_lines = "\n".join(f"{json.dumps(path)} = true" for path in roots)
     server_args = [str(Path(__file__).resolve()), "_review-fs-mcp"]
     for root in roots:
         server_args.extend(("--root", root))
+    if coverage_log is not None:
+        server_args.extend(("--coverage-log", str(coverage_log.resolve())))
     args_toml = ", ".join(json.dumps(value) for value in server_args)
     tools_toml = ", ".join(
         json.dumps(value) for value in CODEX_REVIEW_MCP_TOOLS
@@ -2411,7 +2657,9 @@ def codex_review_profile(
 
 
 @contextmanager
-def isolated_codex_home(*, workspace_roots: Sequence[Path]) -> Any:
+def isolated_codex_home(
+    *, workspace_roots: Sequence[Path], coverage_log: Path | None = None
+) -> Any:
     """Stage Codex auth privately while denying reviewer reads outside roots."""
     source_home = codex_home_from_environment()
     source_auth = source_home / "auth.json"
@@ -2473,6 +2721,7 @@ def isolated_codex_home(*, workspace_roots: Sequence[Path]) -> Any:
             codex_review_profile(
                 workspace_roots=workspace_roots,
                 credential_store="file",
+                coverage_log=coverage_log,
             ),
         )
         yield isolated_home
@@ -2487,6 +2736,12 @@ def isolated_codex_process_environment(
 
 
 def review_mcp_resolve_path(raw_path: str, roots: Sequence[Path]) -> Path:
+    if len(raw_path) > CODEX_REVIEW_MCP_MAX_PATH_CHARS:
+        raise ReviewError(
+            f"Path must be at most {CODEX_REVIEW_MCP_MAX_PATH_CHARS} characters."
+        )
+    if "\0" in raw_path:
+        raise ReviewError("Path contains an invalid NUL character.")
     if not raw_path or raw_path == ".":
         candidates = [roots[0]]
     else:
@@ -2499,7 +2754,7 @@ def review_mcp_resolve_path(raw_path: str, roots: Sequence[Path]) -> Path:
     for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             continue
         if any(resolved.is_relative_to(root) for root in roots):
             return resolved
@@ -2516,6 +2771,8 @@ def review_mcp_display_path(path: Path, roots: Sequence[Path]) -> str:
 
 
 def review_mcp_read_file(arguments: dict[str, Any], roots: Sequence[Path]) -> str:
+    if set(arguments) - {"path", "start_line", "end_line"}:
+        raise ReviewError("read_file received unsupported arguments.")
     raw_path = arguments.get("path")
     if not isinstance(raw_path, str) or not raw_path:
         raise ReviewError("read_file requires a non-empty path.")
@@ -2524,43 +2781,76 @@ def review_mcp_read_file(arguments: dict[str, Any], roots: Sequence[Path]) -> st
         raise ReviewError("read_file path is not a regular file.")
     start_line = arguments.get("start_line", 1)
     end_line = arguments.get("end_line")
-    if not isinstance(start_line, int) or start_line < 1:
+    if type(start_line) is not int or start_line < 1:
         raise ReviewError("start_line must be a positive integer.")
     if end_line is not None and (
-        not isinstance(end_line, int) or end_line < start_line
+        type(end_line) is not int or end_line < start_line
     ):
         raise ReviewError("end_line must be an integer at or after start_line.")
     if end_line is not None and end_line - start_line > 2_000:
         raise ReviewError("read_file accepts at most 2,001 lines per call.")
-    emitted: list[str] = []
-    emitted_bytes = 0
-    truncated = False
+    header = f"# {review_mcp_display_path(path, roots)}\n"
     try:
-        with path.open(encoding="utf-8", errors="replace") as source:
-            for number, line in enumerate(source, start=1):
-                if number < start_line:
-                    continue
-                if end_line is not None and number > end_line:
-                    break
-                rendered = f"{number}: {line.rstrip()}\n"
-                size = len(rendered.encode("utf-8"))
-                if emitted_bytes + size > CODEX_REVIEW_MCP_MAX_READ_BYTES:
-                    truncated = True
-                    break
-                emitted.append(rendered)
-                emitted_bytes += size
+        with path.open("rb") as source:
+            raw = source.read(CODEX_REVIEW_MCP_MAX_READ_BYTES + 1)
     except OSError as exc:
         raise ReviewError(f"Cannot read review file: {type(exc).__name__}.") from exc
-    header = f"# {review_mcp_display_path(path, roots)}\n"
+    truncated = len(raw) > CODEX_REVIEW_MCP_MAX_READ_BYTES
+    if truncated:
+        raw = raw[:CODEX_REVIEW_MCP_MAX_READ_BYTES]
+    try:
+        raw.decode("utf-8")
+        decode_incomplete = False
+    except UnicodeDecodeError:
+        decode_incomplete = True
+    lines = raw.splitlines()
+    if truncated and b"\n" not in raw and b"\r" not in raw:
+        return (
+            header
+            + f"[read incomplete: line 1 exceeds the {CODEX_REVIEW_MCP_MAX_READ_BYTES}-byte "
+            "scan budget; use a narrower artifact or controller evidence]\n"
+        )
+    emitted: list[str] = []
+    emitted_bytes = 0
+    for number, raw_line in enumerate(lines, start=1):
+        if number < start_line:
+            continue
+        if end_line is not None and number > end_line:
+            break
+        rendered = f"{number}: {raw_line.decode('utf-8', errors='replace')}\n"
+        size = len(rendered.encode("utf-8"))
+        if emitted_bytes + size > CODEX_REVIEW_MCP_MAX_READ_BYTES:
+            truncated = True
+            break
+        emitted.append(rendered)
+        emitted_bytes += size
     if not emitted:
-        return header + "(no lines in requested range)\n"
-    suffix = "[output truncated; request a narrower line range]\n" if truncated else ""
+        if truncated:
+            return (
+                header
+                + "[read incomplete before the requested range; use a smaller file, "
+                "a narrower source artifact, or controller evidence]\n"
+            )
+        return header + "(no lines in requested range; complete file scanned)\n"
+    suffix_parts = []
+    if truncated:
+        suffix_parts.append(
+            "[output truncated; the read is incomplete, request a narrower line range]"
+        )
+    if decode_incomplete:
+        suffix_parts.append(
+            "[read contains invalid UTF-8; replacement characters are shown and "
+            "byte-level coverage is incomplete]"
+        )
+    suffix = "\n".join(suffix_parts) + ("\n" if suffix_parts else "")
     return header + "".join(emitted) + suffix
 
 
 def review_mcp_list_directory(
     arguments: dict[str, Any], roots: Sequence[Path]
 ) -> str:
+    if set(arguments) - {"path"}:
+        raise ReviewError("list_directory received unsupported arguments.")
     raw_path = arguments.get("path", ".")
     if not isinstance(raw_path, str):
         raise ReviewError("list_directory path must be a string.")
@@ -2569,7 +2859,14 @@ def review_mcp_list_directory(
         raise ReviewError("list_directory path is not a directory.")
     entries: list[str] = []
     try:
-        for entry in sorted(path.iterdir(), key=lambda item: item.name):
+        with os.scandir(path) as iterator:
+            bounded_entries = []
+            for entry in iterator:
+                bounded_entries.append(entry)
+                if len(bounded_entries) > 1_000:
+                    break
+        for entry_value in sorted(bounded_entries[:1_000], key=lambda item: item.name):
+            entry = Path(entry_value.path)
             resolved = entry.resolve(strict=False)
             if not any(resolved.is_relative_to(root) for root in roots):
                 kind = "blocked-symlink"
@@ -2584,9 +2881,10 @@ def review_mcp_list_directory(
             entries.append(
                 f"{kind}\t{review_mcp_display_path(entry, roots)}"
             )
-            if len(entries) >= 1_000:
-                entries.append("[listing truncated at 1,000 entries]")
-                break
+        if len(bounded_entries) > 1_000:
+            entries.append(
+                "[listing truncated at 1,000 entries; enumerate a narrower directory]"
+            )
     except OSError as exc:
         raise ReviewError(
             f"Cannot list review directory: {type(exc).__name__}."
@@ -2596,6 +2894,8 @@ def review_mcp_list_directory(
 
 
 def review_mcp_search(arguments: dict[str, Any], roots: Sequence[Path]) -> str:
+    if set(arguments) - {"query", "path", "case_sensitive"}:
+        raise ReviewError("search received unsupported arguments.")
     query = arguments.get("query")
     if not isinstance(query, str) or not query:
         raise ReviewError("search requires a non-empty query.")
@@ -2610,57 +2910,112 @@ def review_mcp_search(arguments: dict[str, Any], roots: Sequence[Path]) -> str:
     target = review_mcp_resolve_path(raw_path, roots)
     needle = query if case_sensitive else query.casefold()
     matches: list[str] = []
+    skipped: dict[str, int] = {}
+    scanned_bytes = 0
+    enumerated_entries = 0
+    incomplete = False
+
+    def skip(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
 
     def inspect_file(path: Path) -> None:
+        nonlocal scanned_bytes, incomplete
         try:
-            if path.stat().st_size > 2 * 1024 * 1024:
+            size = path.stat().st_size
+            if size > CODEX_REVIEW_MCP_MAX_SEARCH_FILE_BYTES:
+                skip("file exceeds per-file scan limit")
+                incomplete = True
                 return
-            with path.open(encoding="utf-8", errors="ignore") as source:
-                for number, line in enumerate(source, start=1):
-                    haystack = line if case_sensitive else line.casefold()
-                    if needle not in haystack:
-                        continue
-                    text = line.strip()
-                    if len(text) > 500:
-                        text = text[:500] + "..."
-                    matches.append(
-                        f"{review_mcp_display_path(path, roots)}:{number}: {text}"
-                    )
-                    if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES:
-                        return
-        except OSError:
-            return
+            if scanned_bytes + size > CODEX_REVIEW_MCP_MAX_SEARCH_TOTAL_BYTES:
+                skip("total scan byte limit reached")
+                incomplete = True
+                return
+            with path.open("rb") as source:
+                raw = source.read(CODEX_REVIEW_MCP_MAX_SEARCH_FILE_BYTES + 1)
+            scanned_bytes += len(raw)
+            if len(raw) > CODEX_REVIEW_MCP_MAX_SEARCH_FILE_BYTES:
+                skip("file grew beyond per-file scan limit")
+                incomplete = True
+                return
+            try:
+                text_value = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text_value = raw.decode("utf-8", errors="replace")
+                skip("invalid UTF-8 required replacement")
+                incomplete = True
+            for number, line in enumerate(text_value.splitlines(), start=1):
+                haystack = line if case_sensitive else line.casefold()
+                if needle not in haystack:
+                    continue
+                text = line.strip()
+                if len(text) > 500:
+                    text = text[:500] + "..."
+                matches.append(
+                    f"{review_mcp_display_path(path, roots)}:{number}: {text}"
+                )
+                if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES:
+                    return
+        except (OSError, UnicodeError):
+            skip("filesystem or decode error")
+            incomplete = True
 
     if target.is_file():
         inspect_file(target)
     elif target.is_dir():
-        for current, directories, files in os.walk(target, followlinks=False):
-            current_path = Path(current)
-            directories[:] = [
-                name
-                for name in directories
-                if name not in CODEX_REVIEW_MCP_IGNORED_DIRS
-                and not (current_path / name).is_symlink()
-            ]
-            for name in sorted(files):
-                path = current_path / name
-                if path.is_symlink():
-                    continue
-                inspect_file(path)
+        pending = [target]
+        while (
+            pending
+            and len(matches) < CODEX_REVIEW_MCP_MAX_MATCHES
+            and enumerated_entries <= CODEX_REVIEW_MCP_MAX_SEARCH_ENTRIES
+        ):
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as iterator:
+                    entries = []
+                    for entry in iterator:
+                        enumerated_entries += 1
+                        if enumerated_entries > CODEX_REVIEW_MCP_MAX_SEARCH_ENTRIES:
+                            incomplete = True
+                            skip("directory entry limit reached")
+                            break
+                        entries.append(entry)
+            except OSError:
+                incomplete = True
+                skip("directory cannot be enumerated")
+                continue
+            for entry in sorted(entries, key=lambda item: item.name, reverse=True):
+                path = Path(entry.path)
+                try:
+                    if entry.is_symlink():
+                        skip("symlink skipped")
+                    elif entry.is_dir(follow_symlinks=False):
+                        if entry.name not in CODEX_REVIEW_MCP_IGNORED_DIRS:
+                            pending.append(path)
+                    elif entry.is_file(follow_symlinks=False):
+                        inspect_file(path)
+                except OSError:
+                    incomplete = True
+                    skip("filesystem error")
                 if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES:
+                    incomplete = True
                     break
-            if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES:
-                break
     else:
         raise ReviewError("search path must be a file or directory.")
+    suffix_lines: list[str] = []
+    if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES:
+        suffix_lines.append("[search truncated at 200 matches; results are incomplete]")
+    if skipped:
+        details = ", ".join(f"{reason}: {count}" for reason, count in sorted(skipped.items()))
+        suffix_lines.append(f"[search skipped content: {details}]")
+    if incomplete:
+        suffix_lines.append(
+            "[search incomplete; absence of a result is not proof of no match. "
+            "Narrow the path or obtain controller evidence.]"
+        )
     if not matches:
-        return "No matches.\n"
-    suffix = (
-        "\n[search truncated at 200 matches]\n"
-        if len(matches) >= CODEX_REVIEW_MCP_MAX_MATCHES
-        else "\n"
-    )
-    return "\n".join(matches) + suffix
+        headline = "No matches in the fully scanned content." if not incomplete else "No matches in scanned content."
+        return headline + "\n" + ("\n".join(suffix_lines) + "\n" if suffix_lines else "")
+    return "\n".join([*matches, *suffix_lines]) + "\n"
 
 
 def review_mcp_tool_definitions() -> list[dict[str, Any]]:
@@ -2723,36 +3078,192 @@ def review_mcp_tool_definitions() -> list[dict[str, Any]]:
 def review_fs_mcp_command(arguments: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--root", action="append", required=True)
+    parser.add_argument("--coverage-log")
     parsed = parser.parse_args(arguments)
     roots = tuple(dict.fromkeys(Path(value).resolve() for value in parsed.root))
     if not roots or any(not root.is_dir() for root in roots):
+        return 2
+    coverage_log = (
+        Path(parsed.coverage_log).resolve() if parsed.coverage_log else None
+    )
+    if coverage_log is not None and not coverage_log.parent.is_dir():
         return 2
 
     def respond(payload: dict[str, Any]) -> None:
         sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
         sys.stdout.flush()
 
-    for line in sys.stdin:
+    def protocol_error(
+        request_id: Any, code: int, message: str
+    ) -> None:
+        respond(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": code, "message": message},
+            }
+        )
+
+    def unique_request_fields(
+        pairs: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate request field {key!r}")
+            value[key] = item
+        return value
+
+    def record_tool_coverage(
+        name: str, arguments_value: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        if coverage_log is None:
+            return
+        text_value = ""
+        content = result.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            text_value = str(content[0].get("text") or "")
+        incomplete_markers = (
+            "incomplete",
+            "truncated",
+            "skipped content",
+        )
+        is_error = result.get("isError") is True
+        complete = not is_error and not any(
+            marker in text_value.lower() for marker in incomplete_markers
+        )
+        raw_path = arguments_value.get("path", ".")
+        path_value = raw_path if isinstance(raw_path, str) else "<invalid>"
+        query = arguments_value.get("query")
+        document = {
+            "schema_version": 1,
+            "recorded_at": utc_now(),
+            "tool": name,
+            "path": path_value[:CODEX_REVIEW_MCP_MAX_PATH_CHARS],
+            "query_sha256": (
+                sha256_text(query) if isinstance(query, str) else None
+            ),
+            "response_bytes": len(text_value.encode("utf-8")),
+            "complete": complete,
+            "limitation": (
+                sanitized_failure_text(text_value)[:1_000]
+                if not complete
+                else None
+            ),
+        }
+        encoded = (json.dumps(document, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+
+        def append_record(content: bytes) -> None:
+            descriptor = os.open(
+                coverage_log,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            try:
+                target = os.fdopen(descriptor, "ab")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with target:
+                target.write(content)
+
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
+            existing_size = coverage_log.stat().st_size if coverage_log.exists() else 0
+            if existing_size + len(encoded) > 1024 * 1024 - 2_048:
+                sentinel = (
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "recorded_at": utc_now(),
+                            "tool": "coverage_receipt",
+                            "path": ".",
+                            "query_sha256": None,
+                            "response_bytes": 0,
+                            "complete": False,
+                            "limitation": "Filesystem-tool coverage receipt limit reached; later tool coverage is unknown.",
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                if existing_size + len(sentinel) <= 1024 * 1024:
+                    append_record(sentinel)
+                raise ReviewError(
+                    "Filesystem-tool coverage receipt reached its 1 MiB limit; "
+                    "the search is incomplete. Narrow subsequent requests."
+                )
+            append_record(encoded)
+            coverage_log.chmod(0o600)
+        except OSError as exc:
+            raise ReviewError(
+                "Cannot persist filesystem-tool coverage receipt: "
+                f"{type(exc).__name__}."
+            ) from exc
+
+    input_stream = sys.stdin.buffer
+    while True:
+        raw_line = input_stream.readline(CODEX_REVIEW_MCP_MAX_REQUEST_BYTES + 1)
+        if not raw_line:
+            break
+        if len(raw_line) > CODEX_REVIEW_MCP_MAX_REQUEST_BYTES:
+            while raw_line and not raw_line.endswith(b"\n"):
+                raw_line = input_stream.readline(
+                    CODEX_REVIEW_MCP_MAX_REQUEST_BYTES + 1
+                )
+            protocol_error(None, -32600, "Request exceeds the 1 MiB input limit")
+            continue
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            protocol_error(None, -32700, "Parse error: request is not UTF-8")
+            continue
+        try:
+            request = json.loads(line, object_pairs_hook=unique_request_fields)
+        except ValueError:
+            protocol_error(None, -32700, "Parse error")
             continue
         if not isinstance(request, dict):
+            protocol_error(None, -32600, "Invalid Request")
             continue
         request_id = request.get("id")
         method = request.get("method")
+        coverage_tool: str | None = None
+        coverage_arguments: dict[str, Any] = {}
+        if (
+            request.get("jsonrpc") != "2.0"
+            or set(request) - {"jsonrpc", "id", "method", "params"}
+            or not isinstance(method, str)
+            or (
+                "id" in request
+                and (
+                    isinstance(request_id, bool)
+                    or not isinstance(request_id, (str, int, type(None)))
+                )
+            )
+        ):
+            protocol_error(request_id, -32600, "Invalid Request")
+            continue
         if "id" not in request:
             continue
         try:
             if method == "initialize":
                 params = request.get("params")
-                requested_version = (
-                    params.get("protocolVersion")
-                    if isinstance(params, dict)
-                    else None
-                )
+                if not isinstance(params, dict):
+                    protocol_error(request_id, -32602, "initialize params must be an object")
+                    continue
+                requested_version = params.get("protocolVersion")
+                if requested_version not in SUPPORTED_MCP_PROTOCOL_VERSIONS:
+                    protocol_error(
+                        request_id,
+                        -32602,
+                        "Unsupported MCP protocol version; supported versions are "
+                        + ", ".join(sorted(SUPPORTED_MCP_PROTOCOL_VERSIONS)),
+                    )
+                    continue
                 result: dict[str, Any] = {
-                    "protocolVersion": requested_version or "2025-06-18",
+                    "protocolVersion": requested_version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "merani-files",
@@ -2760,17 +3271,33 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                     },
                 }
             elif method == "ping":
+                if request.get("params") not in (None, {}):
+                    protocol_error(request_id, -32602, "ping params must be empty")
+                    continue
                 result = {}
             elif method == "tools/list":
+                if request.get("params") not in (None, {}):
+                    protocol_error(request_id, -32602, "tools/list params must be empty")
+                    continue
                 result = {"tools": review_mcp_tool_definitions()}
             elif method == "tools/call":
                 params = request.get("params")
                 if not isinstance(params, dict):
-                    raise ReviewError("tools/call params must be an object.")
+                    protocol_error(request_id, -32602, "tools/call params must be an object")
+                    continue
+                if set(params) - {"name", "arguments"}:
+                    protocol_error(request_id, -32602, "tools/call contains unsupported params")
+                    continue
                 name = params.get("name")
-                tool_arguments = params.get("arguments") or {}
+                tool_arguments = params.get("arguments", {})
+                if not isinstance(name, str) or not name:
+                    protocol_error(request_id, -32602, "Tool name must be non-empty text")
+                    continue
                 if not isinstance(tool_arguments, dict):
-                    raise ReviewError("Tool arguments must be an object.")
+                    protocol_error(request_id, -32602, "Tool arguments must be an object")
+                    continue
+                coverage_tool = name
+                coverage_arguments = tool_arguments
                 if name == "read_file":
                     text = review_mcp_read_file(tool_arguments, roots)
                 elif name == "list_directory":
@@ -2778,7 +3305,8 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                 elif name == "search":
                     text = review_mcp_search(tool_arguments, roots)
                 else:
-                    raise ReviewError("Unknown review-files tool.")
+                    protocol_error(request_id, -32602, "Unknown review-files tool")
+                    continue
                 result = {"content": [{"type": "text", "text": text}]}
             else:
                 respond(
@@ -2794,8 +3322,72 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                 "content": [{"type": "text", "text": str(exc)}],
                 "isError": True,
             }
+        if coverage_tool is not None:
+            try:
+                record_tool_coverage(
+                    coverage_tool, coverage_arguments, result
+                )
+            except ReviewError as exc:
+                result = {
+                    "content": [{"type": "text", "text": str(exc)}],
+                    "isError": True,
+                }
         respond({"jsonrpc": "2.0", "id": request_id, "result": result})
     return 0
+
+
+def persist_provider_diagnostics(
+    run_dir: Path,
+    provider: str,
+    *,
+    stdout_bytes: bytes,
+    stderr_bytes: bytes,
+    stdout_total: int,
+    stderr_total: int,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+) -> dict[str, Any]:
+    stdout_path = run_dir / f"{provider}.stdout.diagnostic.bin"
+    stderr_path = run_dir / f"{provider}.stderr.diagnostic.bin"
+    safe_write_bytes(stdout_path, stdout_bytes)
+    safe_write_bytes(stderr_path, stderr_bytes)
+    document = {
+        "schema_version": 1,
+        "provider": provider,
+        "encoding": "raw bytes; decoded as UTF-8 with replacement for parsing",
+        "privacy": "private mode-0600 artifact; never emitted to operator output",
+        "redaction": "not applied to private raw bytes; public error text is sanitized",
+        "stdout": {
+            "total_bytes": stdout_total,
+            "total_bytes_complete": not stdout_truncated,
+            "retained_bytes": len(stdout_bytes),
+            "truncated": stdout_truncated,
+            "sha256_retained": hashlib.sha256(stdout_bytes).hexdigest(),
+            "artifact": stdout_path.name,
+        },
+        "stderr": {
+            "total_bytes": stderr_total,
+            "total_bytes_complete": not stderr_truncated,
+            "retained_bytes": len(stderr_bytes),
+            "truncated": stderr_truncated,
+            "sha256_retained": hashlib.sha256(stderr_bytes).hexdigest(),
+            "artifact": stderr_path.name,
+        },
+    }
+    safe_write_json(run_dir / f"{provider}.diagnostic.json", document)
+    return document
+
+
+def valid_provider_usage(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def invoke_reviewer(
@@ -2844,9 +3436,24 @@ def invoke_reviewer(
     timed_out = False
     forced_failure_category: str | None = None
     started = dt.datetime.now(dt.timezone.utc)
+    attempt_id: str | None = None
+    process_started = False
+    stdout_bytes = b""
+    stderr_bytes = b""
+    output_diagnostics: dict[str, Any] | None = None
+    process_registration_accepted = True
+
+    def recorded(result: ReviewResult) -> ReviewResult:
+        if attempt_id is not None:
+            settle_provider_attempt(run_dir, attempt_id, result=result)
+        return result
+
     try:
         codex_home_context = (
-            isolated_codex_home(workspace_roots=(repo, input_dir))
+            isolated_codex_home(
+                workspace_roots=(repo, input_dir),
+                coverage_log=run_dir / "codex.tool-coverage.jsonl",
+            )
             if reviewer.name == "codex"
             else nullcontext(None)
         )
@@ -2856,6 +3463,7 @@ def invoke_reviewer(
                     reviewer,
                     isolated_home=isolated_home,
                 )
+            attempt_id = begin_provider_attempt(run_dir, reviewer)
             process = subprocess.Popen(
                 command,
                 cwd=repo,
@@ -2871,42 +3479,95 @@ def invoke_reviewer(
                 env=environment,
                 start_new_session=True,
             )
+            process_started = True
             if process_registry:
-                process_registry.add(process)
+                process_registration_accepted = process_registry.add(process)
             try:
                 try:
-                    if reviewer.name == "codex":
-                        (
-                            stdout,
-                            stderr,
-                            timed_out,
-                            forced_failure_category,
-                        ) = communicate_with_codex_network_watch(
-                            process,
-                            input_text=input_text,
-                            timeout_seconds=timeout_seconds,
+                    if attempt_id is not None:
+                        mark_provider_attempt_launched(run_dir, attempt_id)
+                    if not process_registration_accepted:
+                        raise ReviewError(
+                            "Reviewer process started after batch cancellation."
                         )
-                    else:
-                        stdout, stderr = process.communicate(
-                            input=input_text, timeout=timeout_seconds
-                        )
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    stdout, stderr = terminate_process_group(process)
-                except KeyboardInterrupt:
-                    if reviewer.name != "codex":
+                    (
+                        stdout,
+                        stderr,
+                        timed_out,
+                        forced_failure_category,
+                    ) = communicate_with_codex_network_watch(
+                        process,
+                        input_text=input_text,
+                        timeout_seconds=timeout_seconds,
+                        watch_network=reviewer.name == "codex",
+                    )
+                except BaseException:
+                    if process.poll() is None:
                         terminate_process_group(process)
+                    try:
+                        interrupted_stats = getattr(
+                            process, "_merani_output_diagnostics", {}
+                        )
+                        interrupted_raw = getattr(
+                            process, "_merani_output_bytes", {}
+                        )
+                        if not isinstance(interrupted_stats, dict):
+                            interrupted_stats = {}
+                        if not isinstance(interrupted_raw, dict):
+                            interrupted_raw = {}
+                        if interrupted_stats or interrupted_raw:
+                            persist_provider_diagnostics(
+                                run_dir,
+                                reviewer.name,
+                                stdout_bytes=interrupted_raw.get("stdout", b""),
+                                stderr_bytes=interrupted_raw.get("stderr", b""),
+                                stdout_total=int(
+                                    interrupted_stats.get("stdout", {}).get("bytes", 0)
+                                ),
+                                stderr_total=int(
+                                    interrupted_stats.get("stderr", {}).get("bytes", 0)
+                                ),
+                                stdout_truncated=bool(
+                                    interrupted_stats.get("stdout", {}).get("truncated")
+                                ),
+                                stderr_truncated=bool(
+                                    interrupted_stats.get("stderr", {}).get("truncated")
+                                ),
+                            )
+                    except (OSError, ReviewError):
+                        pass
+                    if attempt_id is not None:
+                        try:
+                            settle_provider_attempt(
+                                run_dir, attempt_id, outcome="interrupted"
+                            )
+                        except ReviewError as settlement_error:
+                            try:
+                                update_metadata(
+                                    run_dir,
+                                    attempt_settlement_failure={
+                                        "recorded_at": utc_now(),
+                                        "attempt_id": attempt_id,
+                                        "message": sanitized_failure_text(
+                                            str(settlement_error)
+                                        ),
+                                    },
+                                )
+                            except ReviewError:
+                                pass
                     raise
             finally:
                 if process_registry:
                     process_registry.discard(process)
     except (OSError, ReviewError) as exc:
+        if process_started:
+            raise
         safe_write(report_path, "")
         redacted_error = sanitized_failure_text(f"{type(exc).__name__}: {exc}")
         safe_write(error_path, redacted_error + "\n")
         record_provider_failure(reviewer.name, "launch_error", redacted_error)
         completed = dt.datetime.now(dt.timezone.utc)
-        return ReviewResult(
+        result = ReviewResult(
             reviewer.name,
             127,
             report_path,
@@ -2918,6 +3579,38 @@ def invoke_reviewer(
             None,
             "launch_error",
         )
+        if attempt_id is not None:
+            settle_provider_attempt(
+                run_dir, attempt_id, outcome="not_started"
+            )
+        return result
+
+    stats = getattr(process, "_merani_output_diagnostics", {})
+    raw_output = getattr(process, "_merani_output_bytes", {})
+    stdout_bytes = raw_output.get(
+        "stdout", stdout.encode("utf-8", errors="replace")
+    )
+    stderr_bytes = raw_output.get(
+        "stderr", stderr.encode("utf-8", errors="replace")
+    )
+    stdout_stats = stats.get("stdout", {})
+    stderr_stats = stats.get("stderr", {})
+    stdout_total = int(stdout_stats.get("bytes") or len(stdout_bytes))
+    stderr_total = int(stderr_stats.get("bytes") or len(stderr_bytes))
+    stdout_truncated = bool(stdout_stats.get("truncated"))
+    stderr_truncated = bool(stderr_stats.get("truncated"))
+    output_diagnostics = persist_provider_diagnostics(
+        run_dir,
+        reviewer.name,
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        stdout_total=stdout_total,
+        stderr_total=stderr_total,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
+    )
+    if stdout_truncated or stderr_truncated:
+        forced_failure_category = "output_truncated"
 
     usage: dict[str, Any] | None = None
     provider_reported_error = False
@@ -2938,7 +3631,7 @@ def invoke_reviewer(
             f"Review timed out after {timeout_seconds} seconds.",
         )
         completed = dt.datetime.now(dt.timezone.utc)
-        return ReviewResult(
+        return recorded(ReviewResult(
             reviewer.name,
             124,
             report_path,
@@ -2949,15 +3642,19 @@ def invoke_reviewer(
             True,
             None,
             "timeout",
-        )
+        ))
 
     report = stdout
-    if stdout.strip():
+    if stdout.strip() and not (stdout_truncated or stderr_truncated):
         decoded = decode_provider_output(
             reviewer.name, stdout, render_structured_review
         )
         report = decoded["report"]
         usage = decoded["usage"]
+        if not valid_provider_usage(usage):
+            usage = None
+            decoded["malformed"] = True
+            decoded["failure_detail"] = "Provider returned invalid usage metadata."
         provider_reported_error = bool(decoded["provider_error"])
         provider_failure_detail = decoded["failure_detail"]
         malformed_provider_response = bool(decoded["malformed"])
@@ -3017,7 +3714,7 @@ def invoke_reviewer(
         )
     else:
         clear_provider_failure(reviewer.name)
-    return ReviewResult(
+    return recorded(ReviewResult(
         reviewer.name,
         effective_returncode,
         report_path,
@@ -3028,7 +3725,173 @@ def invoke_reviewer(
         False,
         usage,
         failure_category,
-    )
+    ))
+
+
+def invoke_reviewers(
+    reviewers: Sequence[Reviewer],
+    *,
+    repo: Path,
+    reviewer_inputs: dict[str, tuple[Path, str]],
+    run_dir: Path,
+    timeout_seconds: int,
+    sequential: bool,
+    process_registry: ReviewerProcessRegistry,
+) -> list[ReviewResult]:
+    """Invoke reviewers with one bounded cancellation policy for run and resume."""
+    if sequential or len(reviewers) == 1:
+        results: list[ReviewResult] = []
+        try:
+            for reviewer in reviewers:
+                results.append(
+                    invoke_reviewer(
+                        reviewer,
+                        repo=repo,
+                        prompt=reviewer_inputs[reviewer.name][1],
+                        run_dir=run_dir,
+                        input_dir=reviewer_inputs[reviewer.name][0],
+                        timeout_seconds=timeout_seconds,
+                        process_registry=process_registry,
+                    )
+                )
+        except BaseException as exc:
+            setattr(exc, "merani_completed_results", results)
+            raise
+        return results
+    prior_attempt_ids: set[str] = set()
+    metadata_path = run_dir / "metadata.json"
+    if metadata_path.is_file():
+        prior_attempt_ids = {
+            str(item["attempt_id"])
+            for item in provider_attempt_receipts(read_json(metadata_path))
+        }
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(reviewers))
+    futures = [
+        executor.submit(
+            invoke_reviewer,
+            reviewer,
+            repo=repo,
+            prompt=reviewer_inputs[reviewer.name][1],
+            run_dir=run_dir,
+            input_dir=reviewer_inputs[reviewer.name][0],
+            timeout_seconds=timeout_seconds,
+            process_registry=process_registry,
+        )
+        for reviewer in reviewers
+    ]
+    try:
+        results = [future.result() for future in futures]
+    except BaseException as exc:
+        completed_before_cancel = {
+            future for future in futures if future.done()
+        }
+        process_registry.cancel(signal.SIGTERM)
+        _, unfinished = concurrent.futures.wait(
+            futures, timeout=REVIEWER_TERMINATION_GRACE_SECONDS
+        )
+        if unfinished:
+            process_registry.signal_all(signal.SIGKILL)
+            concurrent.futures.wait(
+                unfinished, timeout=REVIEWER_TERMINATION_GRACE_SECONDS
+            )
+        executor.shutdown(wait=False, cancel_futures=True)
+        completed_results: list[ReviewResult] = []
+        for future in futures:
+            if not future.done() or future.cancelled():
+                continue
+            try:
+                completed_results.append(future.result())
+            except BaseException:
+                continue
+        interrupted_providers = [
+            reviewers[index].name
+            for index, future in enumerate(futures)
+            if future not in completed_before_cancel
+        ]
+        try:
+            mark_provider_attempts_interrupted(
+                run_dir,
+                interrupted_providers,
+                prior_attempt_ids=prior_attempt_ids,
+            )
+        except ReviewError as persistence_error:
+            setattr(
+                exc,
+                "merani_interruption_persistence_error",
+                sanitized_failure_text(str(persistence_error)),
+            )
+        setattr(exc, "merani_completed_results", completed_results)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        return results
+
+
+def persist_completed_peer_results(
+    exc: BaseException,
+    *,
+    run_dir: Path,
+    metadata: dict[str, Any],
+    reviewers: Sequence[Reviewer],
+) -> None:
+    """Keep completed peer evidence when cancellation interrupts a batch."""
+    results = getattr(exc, "merani_completed_results", None)
+    if (
+        not isinstance(results, list)
+        or not results
+        or not all(isinstance(result, ReviewResult) for result in results)
+    ):
+        return
+    try:
+        persist_review_results(
+            run_dir=run_dir,
+            metadata=metadata,
+            reviewers=[
+                reviewer
+                for reviewer in reviewers
+                if any(result.name == reviewer.name for result in results)
+            ],
+            results=results,
+        )
+    except ReviewError as persistence_error:
+        try:
+            update_metadata(
+                run_dir,
+                completed_peer_persistence_failure={
+                    "recorded_at": utc_now(),
+                    "message": sanitized_failure_text(str(persistence_error)),
+                },
+            )
+        except ReviewError:
+            pass
+
+
+def cleanup_private_workspace(
+    run_dir: Path, workspace: Path, *, primary_error: BaseException | None
+) -> None:
+    if not workspace.exists():
+        return
+    try:
+        shutil.rmtree(workspace)
+    except OSError as exc:
+        detail = sanitized_failure_text(
+            f"Cannot remove private snapshot workspace: {type(exc).__name__}: {exc}"
+        )
+        try:
+            update_metadata(
+                run_dir,
+                cleanup_failure={
+                    "recorded_at": utc_now(),
+                    "path": str(workspace),
+                    "message": detail,
+                },
+            )
+        except ReviewError:
+            pass
+        if primary_error is None:
+            raise ReviewError(
+                f"{detail}. Remove the retained private workspace manually: {workspace}"
+            ) from exc
 
 
 def repository_metadata(repo: Path) -> dict[str, Any]:
@@ -3096,9 +3959,10 @@ def resolve_run_dir(requested: str) -> Path:
 
 def update_metadata(run_dir: Path, **updates: Any) -> dict[str, Any]:
     path = run_dir / "metadata.json"
-    metadata = read_json(path) if path.exists() else {}
-    metadata.update(updates)
-    safe_write_json(path, metadata)
+    with exclusive_file_lock(run_dir / "provider-attempts"):
+        metadata = read_json(path) if path.exists() else {}
+        metadata.update(updates)
+        safe_write_json(path, metadata)
     return metadata
 
 
@@ -3111,12 +3975,13 @@ def update_terminal_error(
 ) -> dict[str, Any]:
     """Record the command failure without overwriting a typed root cause."""
     metadata_path = run_dir / "metadata.json"
-    metadata = read_json(metadata_path) if metadata_path.exists() else {}
-    if not isinstance(metadata.get("failure"), dict):
-        metadata["failure"] = {"type": error_type, "message": message}
-    metadata["terminal_error"] = {"type": error_type, "message": message}
-    metadata.update(updates)
-    safe_write_json(metadata_path, metadata)
+    with exclusive_file_lock(run_dir / "provider-attempts"):
+        metadata = read_json(metadata_path) if metadata_path.exists() else {}
+        if not isinstance(metadata.get("failure"), dict):
+            metadata["failure"] = {"type": error_type, "message": message}
+        metadata["terminal_error"] = {"type": error_type, "message": message}
+        metadata.update(updates)
+        safe_write_json(metadata_path, metadata)
     return metadata
 
 
@@ -3328,8 +4193,7 @@ def freshness_status(
             is_initial_commit
             and not task_worktree_paths
             and committed_paths == reviewed_paths
-            and isinstance(expected_content, str)
-            and content_fingerprint(repo, reviewed_paths) == expected_content
+            and result_content_is_equivalent(repo, reviewed_paths, metadata)
         )
         return {
             "fresh": equivalent,
@@ -3362,7 +4226,12 @@ def freshness_status(
             "commit": head,
         }
 
-    if isinstance(expected_content, str):
+    schema_version = metadata.get("schema_version")
+    if isinstance(metadata.get("result_content_manifest"), list) or (
+        type(schema_version) is int and schema_version >= 15
+    ):
+        equivalent = result_content_is_equivalent(repo, reviewed_paths, metadata)
+    elif isinstance(expected_content, str):
         equivalent = content_fingerprint(repo, reviewed_paths) == expected_content
     else:
         patch_path = run_dir / "change.patch"
@@ -3903,6 +4772,15 @@ def workflow_usage_policy(identifier: str) -> dict[str, Any] | None:
 def workflow_provider_attempts(identifier: str) -> dict[str, int]:
     counts = {provider: 0 for provider in PROVIDERS}
     for _, metadata in workflow_lineage_runs(identifier):
+        receipts = provider_attempt_receipts(metadata)
+        if receipts:
+            for attempt in receipts:
+                if attempt.get("state") == "not_started":
+                    continue
+                provider = attempt.get("provider")
+                if provider in counts:
+                    counts[str(provider)] += 1
+            continue
         reviewers = metadata.get("reviewers")
         if not isinstance(reviewers, dict):
             continue
@@ -3943,7 +4821,19 @@ def readiness_status(*, enabled: bool, readiness: ProviderReadiness) -> str:
         return "disabled"
     if readiness.ready is None:
         return "not_probed"
+    if (
+        not readiness.ready
+        and readiness.authentication_mode == "boundary_unavailable"
+    ):
+        return "boundary_unavailable"
     return "ready" if readiness.ready else "unready"
+
+
+def execution_boundary() -> str:
+    """Describe the local process boundary without claiming host-wide state."""
+    if os.environ.get("CODEX_SANDBOX"):
+        return "codex_sandbox"
+    return "host_or_unidentified"
 
 
 def provider_usage_reservation_counts(identifier: str) -> dict[str, int]:
@@ -4052,7 +4942,10 @@ def reviewer_resource_metadata(reviewer: Reviewer) -> dict[str, str]:
     authentication_mode = "unknown"
     usage_resource = "provider_allowance"
     if reviewer.name == "claude":
-        authentication_mode, _, _ = claude_authentication_mode(reviewer.command[0])
+        authentication_mode, _, _ = claude_authentication_mode(
+            reviewer.command[0],
+            environment=reviewer_process_environment(reviewer),
+        )
         usage_resource = (
             "included_plan_allowance"
             if authentication_mode == "subscription"
@@ -4972,35 +5865,35 @@ def workflow_metrics(
                         paths = coverage.get("unreviewed_changed_paths")
                         if isinstance(paths, list):
                             metrics["unreviewed_changed_paths"] += len(paths)
-                for attempt in reviewer_attempts(reviewer):
-                    metrics["reviewer_invocations"] += 1
-                    succeeded = reviewer_attempt_succeeded(attempt)
-                    counter = (
-                        "successful_reviewer_invocations"
-                        if succeeded
-                        else "failed_reviewer_invocations"
-                    )
-                    metrics[counter] += 1
-                    metrics["reviewer_duration_seconds"] += float(
-                        attempt.get("duration_seconds") or 0
-                    )
-                    model = attempt.get("model")
-                    if isinstance(model, str):
-                        attempted_models.add(model)
-                        if succeeded:
-                            successful_models.add(model)
-                    usage = attempt.get("usage")
-                    if isinstance(usage, dict):
-                        metrics["reported_cost_usd"] += float(
-                            usage.get("total_cost_usd") or 0
-                        )
-                        metrics["reviewer_turns"] += int(
-                            usage.get("num_turns") or 0
-                        )
-                        tokens = normalized_usage_tokens(usage)
-                        if tokens["total_tokens"]:
-                            metrics["attempts_with_token_usage"] += 1
-                            add_token_usage(metrics["token_usage"], tokens)
+        for _, attempt in metadata_attempts_by_provider(metadata):
+            metrics["reviewer_invocations"] += 1
+            succeeded = reviewer_attempt_succeeded(attempt)
+            counter = (
+                "successful_reviewer_invocations"
+                if succeeded
+                else "failed_reviewer_invocations"
+            )
+            metrics[counter] += 1
+            metrics["reviewer_duration_seconds"] += float(
+                attempt.get("duration_seconds") or 0
+            )
+            model = attempt.get("model")
+            if isinstance(model, str):
+                attempted_models.add(model)
+                if succeeded:
+                    successful_models.add(model)
+            usage = attempt.get("usage")
+            if isinstance(usage, dict):
+                metrics["reported_cost_usd"] += float(
+                    usage.get("total_cost_usd") or 0
+                )
+                metrics["reviewer_turns"] += int(
+                    usage.get("num_turns") or 0
+                )
+                tokens = normalized_usage_tokens(usage)
+                if tokens["total_tokens"]:
+                    metrics["attempts_with_token_usage"] += 1
+                    add_token_usage(metrics["token_usage"], tokens)
         triage_path = run_dir / "triage.json"
         if not triage_path.exists():
             continue
@@ -5253,65 +6146,62 @@ def analytics_report(since_days: int) -> dict[str, Any]:
                     for item in metadata["reviewers"].values()
                 ):
                     partial_runs += 1
-        reviewers = metadata.get("reviewers")
-        if not isinstance(reviewers, dict):
+        attempts_by_provider = metadata_attempts_by_provider(metadata)
+        if not attempts_by_provider:
             continue
-        for name, reviewer in reviewers.items():
-            if not isinstance(reviewer, dict):
-                continue
-            for attempt in reviewer_attempts(reviewer):
-                attempt_durations.append(float(attempt.get("duration_seconds") or 0))
-                add_attempt_to_analytics_group(mode_summary, attempt)
-                add_attempt_to_analytics_group(phase_summary, attempt)
-                summary = providers.setdefault(
-                    str(name),
-                    {
-                        "invocations": 0,
-                        "successful": 0,
-                        "failed": 0,
-                        "cost_usd": 0.0,
-                        "attempts_with_token_usage": 0,
-                        "token_usage": empty_token_usage(),
-                    },
+        for name, attempt in attempts_by_provider:
+            attempt_durations.append(float(attempt.get("duration_seconds") or 0))
+            add_attempt_to_analytics_group(mode_summary, attempt)
+            add_attempt_to_analytics_group(phase_summary, attempt)
+            summary = providers.setdefault(
+                str(name),
+                {
+                    "invocations": 0,
+                    "successful": 0,
+                    "failed": 0,
+                    "cost_usd": 0.0,
+                    "attempts_with_token_usage": 0,
+                    "token_usage": empty_token_usage(),
+                },
+            )
+            summary["invocations"] += 1
+            if reviewer_attempt_succeeded(attempt):
+                summary["successful"] += 1
+            else:
+                summary["failed"] += 1
+                category = (
+                    "invalid_report"
+                    if int(attempt.get("exit_code") or 0) == 0
+                    and attempt.get("report_contract_valid") is False
+                    else str(attempt.get("failure_category") or "unknown")
                 )
-                summary["invocations"] += 1
-                if reviewer_attempt_succeeded(attempt):
-                    summary["successful"] += 1
-                else:
-                    summary["failed"] += 1
-                    category = (
-                        "invalid_report"
-                        if int(attempt.get("exit_code") or 0) == 0
-                        and attempt.get("report_contract_valid") is False
-                        else str(attempt.get("failure_category") or "unknown")
+                provider_failure_categories[category] = (
+                    provider_failure_categories.get(category, 0) + 1
+                )
+            usage = attempt.get("usage")
+            if isinstance(usage, dict):
+                attempt_cost = float(usage.get("total_cost_usd") or 0)
+                attempt_costs.append(attempt_cost)
+                summary["cost_usd"] += attempt_cost
+                tokens = normalized_usage_tokens(usage)
+                if tokens["total_tokens"]:
+                    summary["attempts_with_token_usage"] += 1
+                    add_token_usage(summary["token_usage"], tokens)
+                fallback_model = str(attempt.get("model") or "unknown")
+                for model, model_tokens, model_cost in provider_model_usage(
+                    usage, fallback_model
+                ):
+                    model_summary = model_usage.setdefault(
+                        model,
+                        {
+                            "reported_uses": 0,
+                            "cost_usd": 0.0,
+                            "token_usage": empty_token_usage(),
+                        },
                     )
-                    provider_failure_categories[category] = (
-                        provider_failure_categories.get(category, 0) + 1
-                    )
-                usage = attempt.get("usage")
-                if isinstance(usage, dict):
-                    attempt_cost = float(usage.get("total_cost_usd") or 0)
-                    attempt_costs.append(attempt_cost)
-                    summary["cost_usd"] += attempt_cost
-                    tokens = normalized_usage_tokens(usage)
-                    if tokens["total_tokens"]:
-                        summary["attempts_with_token_usage"] += 1
-                        add_token_usage(summary["token_usage"], tokens)
-                    fallback_model = str(attempt.get("model") or "unknown")
-                    for model, model_tokens, model_cost in provider_model_usage(
-                        usage, fallback_model
-                    ):
-                        model_summary = model_usage.setdefault(
-                            model,
-                            {
-                                "reported_uses": 0,
-                                "cost_usd": 0.0,
-                                "token_usage": empty_token_usage(),
-                            },
-                        )
-                        model_summary["reported_uses"] += 1
-                        model_summary["cost_usd"] += model_cost
-                        add_token_usage(model_summary["token_usage"], model_tokens)
+                    model_summary["reported_uses"] += 1
+                    model_summary["cost_usd"] += model_cost
+                    add_token_usage(model_summary["token_usage"], model_tokens)
     for summary in providers.values():
         summary["cost_usd"] = round(summary["cost_usd"], 6)
     finalize_analytics_groups(review_modes)
@@ -5647,9 +6537,10 @@ def historical_budget_estimate(
         )
         reviewers = metadata.get("reviewers")
         reviewer = reviewers.get(provider) if isinstance(reviewers, dict) else None
-        if not isinstance(reviewer, dict):
-            continue
-        for attempt in reviewer_attempts(reviewer):
+        reviewer = reviewer if isinstance(reviewer, dict) else {}
+        for attempt_provider, attempt in metadata_attempts_by_provider(metadata):
+            if attempt_provider != provider:
+                continue
             usage = attempt.get("usage")
             cost = usage.get("total_cost_usd") if isinstance(usage, dict) else None
             valid_cost = not (
@@ -6316,7 +7207,7 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
         binding = "unfinalized"
         commit_attested = False
         commit_bound = False
-        deployment_ready = False
+        review_commit_ready = False
         if final_path.exists():
             final = read_json(final_path)
             final_status = final.get("status")
@@ -6338,9 +7229,10 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 triage_fresh = final_triage_is_fresh(
                     run_dir, metadata, final
                 )
+                schema_version = final.get("schema_version")
                 assurance_fresh = (
                     final_assurance_is_fresh(run_dir, metadata, final)
-                    if int(final.get("schema_version") or 0) >= 12
+                    if type(schema_version) is int and schema_version >= 12
                     else True
                 )
                 fresh = (
@@ -6353,12 +7245,14 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 commit_attested = commit_is_attested(final, commit)
             except ReviewError:
                 fresh = False
-            passing_status = str(final_status).startswith("PASS") or (
-                str(final_status).startswith("SUPPLEMENTAL_")
-                and final_status != "SUPPLEMENTAL_BLOCK"
-            )
+            passing_status = final_status in {
+                "PASS_CLEAN",
+                "PASS_WITH_FINDINGS",
+                "SUPPLEMENTAL_CLEAN",
+                "SUPPLEMENTAL_WITH_FINDINGS",
+            }
             state = "ready" if fresh and passing_status else "blocked"
-            deployment_ready = bool(
+            review_commit_ready = bool(
                 fresh and passing_status and commit_bound
             )
         phase = str(metadata.get("phase", "repair"))
@@ -6387,7 +7281,8 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 "binding": binding,
                 "commit_attested": commit_attested,
                 "commit_bound": commit_bound,
-                "deployment_ready": deployment_ready,
+                "review_commit_ready": review_commit_ready,
+                "deployment_ready": False,
                 "final_status": final_status,
                 "accepts_reviews": not confirmation_complete,
             }
@@ -6429,6 +7324,7 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
                 "binding": "unreviewed",
                 "commit_attested": False,
                 "commit_bound": False,
+                "review_commit_ready": False,
                 "deployment_ready": False,
                 "final_status": None,
                 "accepts_reviews": True,
@@ -6468,6 +7364,11 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
     attempted_providers: set[str] = set()
     successful_providers: set[str] = set()
     for _, metadata in lineage_runs:
+        attempted_providers.update(
+            provider
+            for provider, _ in metadata_attempts_by_provider(metadata)
+            if provider in PROVIDERS
+        )
         reviewers = metadata.get("reviewers")
         if not isinstance(reviewers, dict):
             continue
@@ -6475,8 +7376,6 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
             if provider not in PROVIDERS or not isinstance(value, dict):
                 continue
             attempts = reviewer_attempts(value)
-            if attempts:
-                attempted_providers.add(provider)
             if any(reviewer_attempt_succeeded(item) for item in attempts):
                 successful_providers.add(provider)
     config = load_config()
@@ -6498,11 +7397,11 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
     artifact_bytes_by_run = {
         run_dir: run_artifact_bytes(run_dir) for run_dir in artifact_run_dirs
     }
-    deployment_ready = (
+    review_commit_ready = (
         workflow_document.get("kind", "standard") != "supplemental"
         and bool(ready)
         and all(
-        bool(item.get("deployment_ready"))
+        bool(item.get("review_commit_ready"))
         for item in repositories
         if item.get("phase") != "supplemental"
         )
@@ -6511,7 +7410,12 @@ def workflow_status(identifier: str) -> tuple[dict[str, Any], bool]:
         "workflow_id": identifier,
         "workflow": workflow_document,
         "ready": ready,
-        "deployment_ready": deployment_ready,
+        "review_commit_ready": review_commit_ready,
+        "deployment_ready": False,
+        "deployment_ready_deprecated": (
+            "Always false: local review and commit evidence cannot verify deployment. "
+            "Use review_commit_ready for a fresh gate bound to a commit."
+        ),
         "state": state,
         "lineage_root": lineage_ids[0] if lineage_ids else identifier,
         "lineage_workflows": lineage_ids,
@@ -6572,10 +7476,12 @@ def _current_run_source_changed(run_dir: Path, metadata: dict[str, Any]) -> bool
 
 def repository_has_stale_passing_final(repository: dict[str, Any]) -> bool:
     final_status = str(repository.get("final_status") or "")
-    passing = final_status.startswith("PASS") or (
-        final_status.startswith("SUPPLEMENTAL_")
-        and final_status != "SUPPLEMENTAL_BLOCK"
-    )
+    passing = final_status in {
+        "PASS_CLEAN",
+        "PASS_WITH_FINDINGS",
+        "SUPPLEMENTAL_CLEAN",
+        "SUPPLEMENTAL_WITH_FINDINGS",
+    }
     return bool(
         repository.get("state") == "blocked"
         and repository.get("final_contract_trusted")
@@ -6907,8 +7813,8 @@ def render_workflow_status_compact(status: dict[str, Any]) -> str:
         (
             f"Workflow {status.get('workflow_id')}: state={status.get('state')}, "
             f"ready={str(bool(status.get('ready'))).lower()}, "
-            "deployment_ready="
-            f"{str(bool(status.get('deployment_ready'))).lower()}, "
+            "review_commit_ready="
+            f"{str(bool(status.get('review_commit_ready'))).lower()}, "
             f"lineage={status.get('lineage_root')}"
         ),
         (
@@ -6949,7 +7855,7 @@ def render_workflow_status_compact(status: dict[str, Any]) -> str:
                 f"- {label}: round={item.get('round')} phase={item.get('phase')} "
                 f"state={item.get('state')} final={item.get('final_status')} "
                 f"fresh={item.get('fresh')} binding={item.get('binding')} "
-                f"deployment_ready={item.get('deployment_ready')}"
+                f"review_commit_ready={item.get('review_commit_ready')}"
             )
     issues = status.get("history_issues")
     if isinstance(issues, list) and issues:
@@ -6998,17 +7904,17 @@ def workflow_finalize_command(args: argparse.Namespace) -> int:
         safe_write_json(final_path, status)
         safe_write_json(workflow_document_path, workflow_document)
     print(f"Workflow PASS (source gate only): {args.workflow_id}")
-    if not status.get("deployment_ready"):
+    if not status.get("review_commit_ready"):
         print(
-            "Deployment binding is incomplete. This proves the reviewed local "
-            "source gate, not a committed or deployed revision. After committing "
+            "Commit binding is incomplete. This proves the reviewed local "
+            "source gate, not a committed revision or deployment. After committing "
             "the exact reviewed bytes, run:",
         )
         for item in status.get("repositories", []):
             if (
                 isinstance(item, dict)
                 and item.get("phase") != "supplemental"
-                and not item.get("deployment_ready")
+                and not item.get("review_commit_ready")
             ):
                 print(
                     "- merani attest-commit --run "
@@ -7083,9 +7989,12 @@ def kimi_provider_readiness(command: str, model: str | None) -> ProviderReadines
     )
 
 
-def claude_authentication_mode(command: str = "claude") -> tuple[str, str, bool]:
+def claude_authentication_mode(
+    command: str = "claude", *, environment: dict[str, str] | None = None
+) -> tuple[str, str, bool]:
     """Return redacted billing mode, detail, and launch permission."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    inspected_environment = os.environ if environment is None else environment
+    if inspected_environment.get("ANTHROPIC_API_KEY"):
         return interpret_auth_status(
             api_key_present=True, returncode=None, stdout=None
         )
@@ -7096,6 +8005,7 @@ def claude_authentication_mode(command: str = "claude") -> tuple[str, str, bool]
             capture_output=True,
             check=False,
             timeout=10,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired):
         return interpret_auth_status(
@@ -7105,6 +8015,7 @@ def claude_authentication_mode(command: str = "claude") -> tuple[str, str, bool]
         api_key_present=False,
         returncode=completed.returncode,
         stdout=completed.stdout,
+        restricted_execution_boundary=execution_boundary() == "codex_sandbox",
     )
 
 
@@ -7163,8 +8074,12 @@ def provider_readiness(
             usage_resource="provider_allowance",
         )
     if provider == "claude":
+        readiness_reviewer = Reviewer(
+            "claude", (command,), {}, model or "", version_of(command)
+        )
         authentication_mode, authentication_detail, ready = claude_authentication_mode(
-            command
+            command,
+            environment=reviewer_process_environment(readiness_reviewer),
         )
         return ProviderReadiness(
             ready,
@@ -7264,6 +8179,7 @@ def status_command(_: argparse.Namespace) -> int:
         f"root={identity['plugin_root']}"
     )
     print(f"Config: {CONFIG_PATH}")
+    print(f"Execution boundary: {execution_boundary()}")
     ready = True
     for provider in PROVIDERS:
         enabled = bool(config[provider]["enabled"])
@@ -7480,12 +8396,23 @@ def claude_cli_contract() -> tuple[bool, str]:
         "--json-schema",
         "--permission-mode",
         "--tools",
-        "--safe-mode",
+        "--disallowedTools",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--settings",
+        "--restricted",
         "--no-session-persistence",
     }
     try:
         completed = subprocess.run(
             ["claude", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        version = subprocess.run(
+            ["claude", "--version"],
             text=True,
             capture_output=True,
             check=False,
@@ -7497,11 +8424,24 @@ def claude_cli_contract() -> tuple[bool, str]:
         return False, "claude --help timed out"
     help_text = f"{completed.stdout}\n{completed.stderr}"
     missing = sorted(flag for flag in required if flag not in help_text)
-    if completed.returncode != 0:
+    if completed.returncode != 0 or version.returncode != 0:
         return False, f"claude --help exited {completed.returncode}"
+    version_match = re.search(
+        r"\b(\d+)\.(\d+)\.(\d+)\b", f"{version.stdout}\n{version.stderr}"
+    )
+    if version_match is None:
+        return False, "Claude CLI version could not be parsed"
+    version_tuple = tuple(int(value) for value in version_match.groups())
+    if version_tuple < (2, 1, 248):
+        return False, (
+            "Claude CLI 2.1.248 or newer is required for restricted evaluation mode"
+        )
     if missing:
         return False, "Claude CLI is missing required flags: " + ", ".join(missing)
-    return True, "Claude CLI supports every configured safety and budget flag"
+    return True, (
+        "Claude CLI supports restricted file-tool confinement and every "
+        "configured output, safety, and budget flag"
+    )
 
 
 def codex_cli_contract() -> tuple[bool, str]:
@@ -7592,6 +8532,63 @@ def private_storage_permissions() -> tuple[bool, str]:
     return True, "private storage modes verified: " + (
         ", ".join(checked) if checked else "paths not created yet"
     )
+
+
+def provider_capability_matrix() -> dict[str, dict[str, Any]]:
+    """Describe the enforced reviewer boundary without claiming live readiness."""
+    return {
+        "claude": {
+            "support": "stable_default",
+            "minimum_cli_version": "2.1.248",
+            "tools": ["Read", "Grep", "Glob"],
+            "read_roots": [
+                "immutable snapshot",
+                "reviewer-specific input",
+            ],
+            "configuration": "restricted mode; managed settings remain a trusted operator boundary",
+            "hooks_and_mcp": "hooks disabled; strict empty MCP config plus MCP tool deny; higher-precedence managed policy may apply",
+            "environment": "provider allowlist",
+            "credentials": "Claude authentication only",
+            "session_persistence": False,
+            "output_contract": "JSON wrapper plus JSON Schema",
+        },
+        "codex": {
+            "support": "stable_opt_in_same_provider_family",
+            "minimum_cli_version": "0.138.0",
+            "tools": ["read_file", "list_directory", "search"],
+            "read_roots": ["immutable snapshot", "reviewer-specific input"],
+            "configuration": "isolated temporary CODEX_HOME and strict profile",
+            "hooks_and_mcp": "only Merani's three-tool filesystem MCP server",
+            "environment": "provider allowlist",
+            "credentials": "temporary file-backed ChatGPT CLI authentication",
+            "session_persistence": False,
+            "output_contract": "JSONL plus JSON Schema",
+        },
+        "antigravity": {
+            "support": "experimental_opt_in",
+            "minimum_cli_version": None,
+            "tools": ["read_many_files", "list_directory", "search_files"],
+            "read_roots": ["immutable snapshot", "reviewer-specific input"],
+            "configuration": "bundled hard read-only custom agent",
+            "hooks_and_mcp": "native CLI behavior; no independent MCP confinement claim",
+            "environment": "provider allowlist",
+            "credentials": "Antigravity authentication only",
+            "session_persistence": "provider CLI controlled",
+            "output_contract": "JSON wrapper",
+        },
+        "kimi": {
+            "support": "experimental_opt_in",
+            "minimum_cli_version": None,
+            "tools": ["native read and search tools"],
+            "read_roots": ["immutable snapshot", "reviewer-specific input"],
+            "configuration": "provider CLI controlled",
+            "hooks_and_mcp": "no independently verified confinement claim",
+            "environment": "provider allowlist",
+            "credentials": "Kimi authentication only",
+            "session_persistence": "provider CLI controlled",
+            "output_contract": "Markdown report",
+        },
+    }
 
 
 def doctor_command(args: argparse.Namespace) -> int:
@@ -7755,7 +8752,9 @@ def doctor_command(args: argparse.Namespace) -> int:
                 "ready": ready,
                 "live_probe": bool(args.live),
                 "checked_at": utc_now(),
+                "execution_boundary": execution_boundary(),
                 "runtime_identity": runtime_identity(),
+                "provider_capabilities": provider_capability_matrix(),
                 "checks": checks,
             },
             indent=2,
@@ -8303,11 +9302,12 @@ def effective_finalization_items(
 
 def incomplete_review_coverage(run_dir: Path) -> list[dict[str, Any]]:
     summary_path = run_dir / "review-summary.json"
-    if not summary_path.exists():
-        return []
-    reviews = read_json(summary_path).get("reviews")
-    if not isinstance(reviews, dict):
-        return []
+    reviews = (
+        read_json(summary_path).get("reviews")
+        if summary_path.exists()
+        else {}
+    )
+    reviews = reviews if isinstance(reviews, dict) else {}
     incomplete: list[dict[str, Any]] = []
     for reviewer, review in reviews.items():
         if not isinstance(review, dict):
@@ -8334,11 +9334,48 @@ def incomplete_review_coverage(run_dir: Path) -> list[dict[str, Any]]:
                     ),
                 }
             )
+    tool_receipt = run_dir / "codex.tool-coverage.jsonl"
+    if tool_receipt.exists():
+        limitations: list[str] = []
+        try:
+            if tool_receipt.stat().st_size > 1024 * 1024:
+                raise ReviewError("Filesystem-tool coverage receipt exceeds 1 MiB.")
+            for line_number, line in enumerate(
+                tool_receipt.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError) as exc:
+                    raise ReviewError(
+                        "Filesystem-tool coverage receipt is malformed at "
+                        f"line {line_number}."
+                    ) from exc
+                if not isinstance(record, dict) or type(record.get("complete")) is not bool:
+                    raise ReviewError(
+                        "Filesystem-tool coverage receipt has an invalid record "
+                        f"at line {line_number}."
+                    )
+                if record["complete"] is False:
+                    limitations.append(
+                        str(record.get("limitation") or "Tool execution was incomplete.")
+                    )
+        except (OSError, UnicodeError, ReviewError) as exc:
+            limitations.append(str(exc))
+        if limitations:
+            incomplete.append(
+                {
+                    "reviewer": "codex-filesystem-tools",
+                    "complete": False,
+                    "unreviewed_changed_paths": [],
+                    "limitations": list(dict.fromkeys(limitations)),
+                }
+            )
     return incomplete
 
 
 def finalize_command(args: argparse.Namespace) -> int:
     os.umask(0o077)
+    finalizer_identity = runtime_identity()
     run_dir = resolve_run_dir(args.run)
     metadata = read_json(run_dir / "metadata.json")
     if metadata.get("status") != "completed":
@@ -8593,7 +9630,7 @@ def finalize_command(args: argparse.Namespace) -> int:
             "failed"
             if phase == "confirmation" and status == "BLOCK"
             else "confirmed"
-            if phase == "confirmation" and status.startswith("PASS")
+            if phase == "confirmation" and status in GATE_STATUSES[:2]
             else "supplemental"
             if phase == "supplemental"
             else "legacy"
@@ -8650,12 +9687,23 @@ def finalize_command(args: argparse.Namespace) -> int:
             for item, candidate_dir, candidate_metadata in history_observations
             if item.get("decision") == "acknowledged"
         ],
+        "producer_identity": metadata.get("runtime_identity"),
+        "finalizer_identity": finalizer_identity,
     }
+    if runtime_identity().get("bundle_sha256") != finalizer_identity.get(
+        "bundle_sha256"
+    ):
+        raise ReviewError(
+            "Merani's executable bundle changed during finalization; rerun "
+            "finalization with a stable bundle."
+        )
     final_name = "supplemental.json" if phase == "supplemental" else "final.json"
     final_path = run_dir / final_name
     safe_write_json(final_path, final)
     print(f"{status}: {final_path}")
-    successful = str(status).startswith("PASS") or status in {
+    successful = status in {
+        "PASS_CLEAN",
+        "PASS_WITH_FINDINGS",
         "SUPPLEMENTAL_CLEAN",
         "SUPPLEMENTAL_WITH_FINDINGS",
     }
@@ -8663,6 +9711,7 @@ def finalize_command(args: argparse.Namespace) -> int:
 
 
 def verify_command(args: argparse.Namespace) -> int:
+    verifier_identity = runtime_identity()
     run_dir = resolve_run_dir(args.run)
     metadata = read_json(run_dir / "metadata.json")
     final_path = run_dir / "final.json"
@@ -8677,9 +9726,10 @@ def verify_command(args: argparse.Namespace) -> int:
     )
     source_fresh = bool(freshness["fresh"])
     triage_fresh = final_triage_is_fresh(run_dir, metadata, final)
+    schema_version = final.get("schema_version")
     assurance_fresh = (
         final_assurance_is_fresh(run_dir, metadata, final)
-        if int(final.get("schema_version") or 0) >= 12
+        if type(schema_version) is int and schema_version >= 12
         else True
     )
     fresh = (
@@ -8691,15 +9741,37 @@ def verify_command(args: argparse.Namespace) -> int:
     status = final.get("status")
     commit = freshness.get("commit")
     binding, commit_bound = review_binding(metadata, final, commit)
-    successful = str(status).startswith("PASS") or status in {
+    successful = status in {
+        "PASS_CLEAN",
+        "PASS_WITH_FINDINGS",
         "SUPPLEMENTAL_CLEAN",
         "SUPPLEMENTAL_WITH_FINDINGS",
     }
-    deployment_ready = bool(
+    review_commit_ready = bool(
         fresh
         and successful
         and commit_bound
         and metadata.get("phase") != "supplemental"
+    )
+    completed_identity = runtime_identity()
+    verifier_identity_stable = (
+        completed_identity.get("bundle_sha256")
+        == verifier_identity.get("bundle_sha256")
+    )
+    safe_write_json(
+        run_dir / "verification-receipt.json",
+        {
+            "schema_version": 1,
+            "verified_at": utc_now(),
+            "final_artifact": final_path.name,
+            "final_sha256": sha256_file(final_path),
+            "status": status,
+            "fresh": fresh,
+            "final_contract_trusted": final_contract_trusted,
+            "review_commit_ready": review_commit_ready,
+            "verifier_identity": verifier_identity,
+            "verifier_identity_stable": verifier_identity_stable,
+        },
     )
     print(
         json.dumps(
@@ -8718,13 +9790,20 @@ def verify_command(args: argparse.Namespace) -> int:
                 "binding": binding,
                 "commit_bound": commit_bound,
                 "commit_attested": commit_is_attested(final, commit),
-                "deployment_ready": deployment_ready,
+                "review_commit_ready": review_commit_ready,
+                "deployment_ready": False,
+                "deployment_ready_deprecated": (
+                    "Always false; local evidence cannot verify deployment."
+                ),
                 "reviewed_fingerprint": final.get("source_fingerprint"),
                 "current_fingerprint": freshness.get("current_fingerprint"),
+                "verifier_identity": verifier_identity,
             },
             indent=2,
         )
     )
+    if not verifier_identity_stable:
+        return 3
     return 0 if fresh and successful else 3
 
 
@@ -8949,6 +10028,273 @@ def reviewer_attempts(reviewer: dict[str, Any]) -> list[dict[str, Any]]:
     return attempts
 
 
+def provider_attempt_receipts(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return durable schema-15 receipts for work that crossed launch admission."""
+    value = metadata.get("provider_attempts")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        schema_version = metadata.get("schema_version")
+        if type(schema_version) is int and schema_version >= 15:
+            raise ReviewError("provider_attempts must be a list in schema 15.")
+        return []
+    receipts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ReviewError(f"Provider attempt receipt {index} must be an object.")
+        attempt_id = item.get("attempt_id")
+        provider = item.get("provider")
+        state = item.get("state")
+        usage_status = item.get("usage_status")
+        outcome = item.get("outcome")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise ReviewError(f"Provider attempt receipt {index} has no identity.")
+        if attempt_id in seen:
+            raise ReviewError(f"Duplicate provider attempt identity: {attempt_id}")
+        if provider not in PROVIDERS:
+            raise ReviewError(f"Provider attempt {attempt_id} has an invalid provider.")
+        if state not in {
+            "launch_pending",
+            "launched",
+            "completed",
+            "interrupted",
+            "not_started",
+        }:
+            raise ReviewError(f"Provider attempt {attempt_id} has an invalid state.")
+        if usage_status not in {"unknown", "reported"}:
+            raise ReviewError(f"Provider attempt {attempt_id} has invalid usage status.")
+        if outcome not in {
+            "unknown",
+            "returned",
+            "failed",
+            "interrupted",
+            "not_started",
+            "invalidated_bundle_drift",
+        }:
+            raise ReviewError(f"Provider attempt {attempt_id} has an invalid outcome.")
+        if "exit_code" in item and (
+            isinstance(item["exit_code"], bool)
+            or not isinstance(item["exit_code"], int)
+        ):
+            raise ReviewError(f"Provider attempt {attempt_id} has an invalid exit code.")
+        seen.add(attempt_id)
+        receipts.append(item)
+    return receipts
+
+
+def metadata_attempts_by_provider(
+    metadata: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    receipts = provider_attempt_receipts(metadata)
+    if receipts:
+        return [
+            (str(item.get("provider") or "unknown"), item)
+            for item in receipts
+            if item.get("state") != "not_started"
+        ]
+    reviewers = metadata.get("reviewers")
+    if not isinstance(reviewers, dict):
+        return []
+    return [
+        (str(provider), attempt)
+        for provider, reviewer in reviewers.items()
+        if isinstance(reviewer, dict)
+        for attempt in reviewer_attempts(reviewer)
+    ]
+
+
+def begin_provider_attempt(run_dir: Path, reviewer: Reviewer) -> str | None:
+    """Persist launch ownership before invoking a provider process."""
+    current_identity = runtime_identity()
+    lock_path = run_dir / "provider-attempts"
+    with exclusive_file_lock(lock_path):
+        metadata_path = run_dir / "metadata.json"
+        if not metadata_path.is_file():
+            # Direct adapter unit tests do not own a workflow artifact. CLI
+            # execution always creates metadata before reaching this boundary.
+            return None
+        metadata = read_json(metadata_path)
+        producer = metadata.get("runtime_identity")
+        if (
+            isinstance(producer, dict)
+            and producer.get("bundle_sha256")
+            and producer.get("bundle_sha256") != current_identity.get("bundle_sha256")
+            and not metadata.get("resumed_at")
+        ):
+            raise ReviewError(
+                "Merani's executable bundle changed before provider launch; "
+                "no provider was started. Restart with the stable bundle."
+            )
+        attempt_id = f"attempt-{uuid.uuid4().hex}"
+        receipts = provider_attempt_receipts(metadata)
+        receipts.append(
+            {
+                "attempt_id": attempt_id,
+                "provider": reviewer.name,
+                "model": reviewer.model,
+                "cli_version": reviewer.cli_version,
+                "state": "launch_pending",
+                "reserved_at": utc_now(),
+                "usage": None,
+                "usage_status": "unknown",
+                "outcome": "unknown",
+                "execution_identity": current_identity,
+            }
+        )
+        metadata["provider_attempts"] = receipts
+        safe_write_json(metadata_path, metadata)
+    return attempt_id
+
+
+def mark_provider_attempt_launched(run_dir: Path, attempt_id: str) -> None:
+    """Record that process creation crossed the provider boundary."""
+    lock_path = run_dir / "provider-attempts"
+    with exclusive_file_lock(lock_path):
+        metadata_path = run_dir / "metadata.json"
+        metadata = read_json(metadata_path)
+        receipts = provider_attempt_receipts(metadata)
+        target = next(
+            (item for item in receipts if item.get("attempt_id") == attempt_id),
+            None,
+        )
+        if target is None or target.get("state") != "launch_pending":
+            raise ReviewError(
+                f"Provider launch receipt is not pending: {attempt_id}"
+            )
+        target["state"] = "launched"
+        target["started_at"] = utc_now()
+        metadata["provider_attempts"] = receipts
+        safe_write_json(metadata_path, metadata)
+
+
+def mark_provider_attempts_interrupted(
+    run_dir: Path,
+    providers: Sequence[str],
+    *,
+    prior_attempt_ids: set[str],
+) -> None:
+    """Conservatively settle providers still owned when a batch is cancelled."""
+    if not providers:
+        return
+    lock_path = run_dir / "provider-attempts"
+    with exclusive_file_lock(lock_path):
+        metadata_path = run_dir / "metadata.json"
+        if not metadata_path.is_file():
+            return
+        metadata = read_json(metadata_path)
+        receipts = provider_attempt_receipts(metadata)
+        for provider in providers:
+            target = next(
+                (
+                    item
+                    for item in reversed(receipts)
+                    if item.get("provider") == provider
+                    and item.get("attempt_id") not in prior_attempt_ids
+                    and (
+                        item.get("state") in {"launch_pending", "launched"}
+                        or (
+                            item.get("state") == "completed"
+                            and item.get("outcome") != "returned"
+                            and item.get("usage_status") != "reported"
+                        )
+                    )
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            target["state"] = "interrupted"
+            target["completed_at"] = utc_now()
+            target["outcome"] = "interrupted"
+            target["usage"] = None
+            target["usage_status"] = "unknown"
+            target["failure_category"] = "interrupted"
+        metadata["provider_attempts"] = receipts
+        safe_write_json(metadata_path, metadata)
+
+
+def settle_provider_attempt(
+    run_dir: Path,
+    attempt_id: str,
+    *,
+    result: ReviewResult | None = None,
+    outcome: str | None = None,
+) -> None:
+    """Settle one receipt independently from source and report finalization."""
+    lock_path = run_dir / "provider-attempts"
+    with exclusive_file_lock(lock_path):
+        metadata_path = run_dir / "metadata.json"
+        metadata = read_json(metadata_path)
+        receipts = provider_attempt_receipts(metadata)
+        target = next(
+            (item for item in receipts if item.get("attempt_id") == attempt_id),
+            None,
+        )
+        if target is None:
+            raise ReviewError(f"Provider attempt receipt is missing: {attempt_id}")
+        if result is None and outcome == "not_started":
+            target["state"] = "not_started"
+            target["completed_at"] = utc_now()
+            target["outcome"] = "not_started"
+            target["usage_status"] = "unknown"
+            target["failure_category"] = "launch_error"
+            metadata["provider_attempts"] = receipts
+            safe_write_json(metadata_path, metadata)
+            return
+        cancellation_already_recorded = (
+            target.get("state") == "interrupted"
+            and target.get("outcome") == "interrupted"
+        )
+        target["state"] = "completed" if result is not None else "interrupted"
+        target["completed_at"] = utc_now()
+        if result is not None:
+            target.update(
+                {
+                    "exit_code": result.returncode,
+                    "timed_out": result.timed_out,
+                    "duration_seconds": round(result.duration_seconds, 3),
+                    "failure_category": result.failure_category,
+                    "usage": result.usage,
+                    "usage_status": (
+                        "reported" if result.usage is not None else "unknown"
+                    ),
+                    "outcome": (
+                        "returned" if result.returncode == 0 else "failed"
+                    ),
+                }
+            )
+        else:
+            target["outcome"] = outcome or "interrupted"
+            target["usage_status"] = "unknown"
+        if cancellation_already_recorded:
+            target["state"] = "interrupted"
+            target["outcome"] = "interrupted"
+            target["usage"] = None
+            target["usage_status"] = "unknown"
+            target["failure_category"] = "interrupted"
+        settlement_identity = runtime_identity()
+        launched_identity = target.get("execution_identity")
+        bundle_drift = bool(
+            isinstance(launched_identity, dict)
+            and launched_identity.get("bundle_sha256")
+            and launched_identity.get("bundle_sha256")
+            != settlement_identity.get("bundle_sha256")
+        )
+        target["settlement_identity"] = settlement_identity
+        if bundle_drift:
+            target["state"] = "interrupted"
+            target["outcome"] = "invalidated_bundle_drift"
+            target["failure_category"] = "bundle_drift"
+        metadata["provider_attempts"] = receipts
+        safe_write_json(metadata_path, metadata)
+        if bundle_drift:
+            raise ReviewError(
+                "Merani's executable bundle changed during provider execution; "
+                "the attempt was charged and invalidated. Restart with a stable bundle."
+            )
+
+
 def reviewer_attempt_succeeded(attempt: dict[str, Any]) -> bool:
     return (
         int(attempt.get("exit_code") or 0) == 0
@@ -8969,6 +10315,10 @@ def reviewer_artifact_archive_plan(
         ".raw.json",
         ".raw.jsonl",
         ".structured.json",
+        ".tool-coverage.jsonl",
+        ".stdout.diagnostic.bin",
+        ".stderr.diagnostic.bin",
+        ".diagnostic.json",
     ):
         source = run_dir / f"{name}{suffix}"
         if not source.exists():
@@ -8991,6 +10341,19 @@ def apply_reviewer_artifact_archive_plan(
     }
     for source, destination in plan:
         source.replace(destination)
+    for source, destination in plan:
+        if not source.name.endswith(".diagnostic.json"):
+            continue
+        diagnostic = read_json(destination)
+        changed = False
+        for stream_name in ("stdout", "stderr"):
+            stream = diagnostic.get(stream_name)
+            artifact = stream.get("artifact") if isinstance(stream, dict) else None
+            if isinstance(artifact, str) and artifact in archived_names:
+                stream["artifact"] = archived_names[artifact]
+                changed = True
+        if changed:
+            safe_write_json(destination, diagnostic)
     for field in ("report", "stderr"):
         current = reviewer.get(field)
         if isinstance(current, str) and current in archived_names:
@@ -9066,6 +10429,12 @@ def persist_review_results(
     reviewers: Sequence[Reviewer],
     results: Sequence[ReviewResult],
 ) -> tuple[list[str], list[str]]:
+    metadata_path = run_dir / "metadata.json"
+    if metadata_path.is_file():
+        persisted_metadata = read_json(metadata_path)
+        metadata["provider_attempts"] = persisted_metadata.get(
+            "provider_attempts", metadata.get("provider_attempts", [])
+        )
     assurance_contract = metadata.get("assurance_contract")
     assurance_claims = (
         validate_assurance_contract(assurance_contract)
@@ -9163,6 +10532,11 @@ def persist_review_results(
         parsed_reviews[str(name)] = parsed
         if int(item.get("exit_code") or 0) != 0:
             item["report_contract_valid"] = False
+            for receipt in reversed(provider_attempt_receipts(metadata)):
+                if receipt.get("provider") == name and "report_contract_valid" not in receipt:
+                    receipt["report_contract_valid"] = False
+                    receipt["verdict"] = parsed["verdict"]
+                    break
             failed_reviewers.append(str(name))
             continue
         invalid = parsed_report_is_invalid(
@@ -9170,6 +10544,11 @@ def persist_review_results(
             require_coverage=bool(metadata.get("coverage_contract_required")),
         )
         item["report_contract_valid"] = not invalid
+        for receipt in reversed(provider_attempt_receipts(metadata)):
+            if receipt.get("provider") == name and "report_contract_valid" not in receipt:
+                receipt["report_contract_valid"] = not invalid
+                receipt["verdict"] = parsed["verdict"]
+                break
         if invalid:
             invalid_reports.append(str(name))
         all_findings.extend(parsed["findings"])
@@ -9418,7 +10797,19 @@ def persist_review_results(
     else:
         metadata.pop("failure", None)
         metadata.pop("terminal_error", None)
-    safe_write_json(run_dir / "metadata.json", metadata)
+    with exclusive_file_lock(run_dir / "provider-attempts"):
+        metadata_path = run_dir / "metadata.json"
+        persisted_metadata = (
+            read_json(metadata_path) if metadata_path.is_file() else {}
+        )
+        persisted_attempts = persisted_metadata.get(
+            "provider_attempts", metadata.get("provider_attempts", [])
+        )
+        persisted_metadata.update(metadata)
+        persisted_metadata["provider_attempts"] = persisted_attempts
+        safe_write_json(metadata_path, persisted_metadata)
+        metadata.clear()
+        metadata.update(persisted_metadata)
     refresh_evidence_run(run_dir)
     return sorted(failed_reviewers), sorted(invalid_reports)
 
@@ -9485,7 +10876,8 @@ def resume_review_locked(
     replace_failed_claude_with_codex: bool = False,
 ) -> int:
     metadata = read_json(run_dir / "metadata.json")
-    if int(metadata.get("schema_version") or 0) < 9:
+    schema_version = metadata.get("schema_version")
+    if type(schema_version) is not int or schema_version < 9:
         raise ReviewError(
             "Runs created before schema 9 cannot be resumed because their full "
             "outgoing snapshot was not fingerprint-bound. Start a fresh review "
@@ -9831,23 +11223,24 @@ def resume_review_locked(
         safe_write_json(run_dir / "metadata.json", metadata)
         process_registry = ReviewerProcessRegistry()
         timeout_seconds = int(policy.get("timeout_minutes") or DEFAULT_TIMEOUT_MINUTES) * 60
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(reviewers)
-        ) as executor:
-            futures = [
-                executor.submit(
-                    invoke_reviewer,
-                    reviewer,
-                    repo=snapshot_dir,
-                    prompt=reviewer_inputs[reviewer.name][1],
-                    run_dir=run_dir,
-                    input_dir=reviewer_inputs[reviewer.name][0],
-                    timeout_seconds=timeout_seconds,
-                    process_registry=process_registry,
-                )
-                for reviewer in reviewers
-            ]
-            results = [future.result() for future in futures]
+        try:
+            results = invoke_reviewers(
+                reviewers,
+                repo=snapshot_dir,
+                reviewer_inputs=reviewer_inputs,
+                run_dir=run_dir,
+                timeout_seconds=timeout_seconds,
+                sequential=False,
+                process_registry=process_registry,
+            )
+        except BaseException as exc:
+            persist_completed_peer_results(
+                exc,
+                run_dir=run_dir,
+                metadata=metadata,
+                reviewers=reviewers,
+            )
+            raise
         after_paths = changed_paths(repo, scope, path_filters)
         after = fingerprint(repo, scope, after_paths, path_filters)
         if after_paths != paths or after != current_fingerprint:
@@ -9872,6 +11265,20 @@ def resume_review_locked(
         print(f"Review resumed and completed: {run_dir}")
         print(completed_review_next_guidance(run_dir, metadata))
         return 0
+    except KeyboardInterrupt:
+        current_status = read_json(run_dir / "metadata.json").get("status")
+        update_terminal_error(
+            run_dir,
+            error_type="interrupted",
+            message="Resume interrupted; owned reviewer process groups were terminated.",
+            status=(
+                "partial"
+                if current_status == "partial" or resume_terminal_status == "partial"
+                else "failed"
+            ),
+            completed_at=utc_now(),
+        )
+        raise
     except ReviewError as exc:
         current_status = read_json(run_dir / "metadata.json").get("status")
         update_terminal_error(
@@ -9900,10 +11307,15 @@ def resume_review_locked(
             f"{diagnostic_path}: {type(exc).__name__}"
         ) from exc
     finally:
-        shutil.rmtree(snapshot_workspace, ignore_errors=True)
-        release_workflow_budget_reservation(
-            str(metadata["workflow_id"]), str(metadata["run_id"])
-        )
+        primary_error = sys.exc_info()[1]
+        try:
+            cleanup_private_workspace(
+                run_dir, snapshot_workspace, primary_error=primary_error
+            )
+        finally:
+            release_workflow_budget_reservation(
+                str(metadata["workflow_id"]), str(metadata["run_id"])
+            )
 
 
 def run_review_command(args: argparse.Namespace) -> int:
@@ -9945,7 +11357,7 @@ def run_review_command(args: argparse.Namespace) -> int:
                 "Supplemental review requires a structured trusted parent "
                 "final: " + "; ".join(parent_issues)
             )
-        if not str(parent_final.get("status") or "").startswith("PASS"):
+        if parent_final.get("status") not in {"PASS_CLEAN", "PASS_WITH_FINDINGS"}:
             raise ReviewError("Supplemental review requires a passing parent gate.")
         parent_freshness = freshness_status(
             parent_dir,
@@ -10245,11 +11657,9 @@ def run_review_command(args: argparse.Namespace) -> int:
     try:
         before = fingerprint(repo, scope, paths, path_filters)
         if supplemental_parent:
-            expected_content = supplemental_parent[1].get(
-                "result_content_fingerprint"
-            )
-            current_content = content_fingerprint(repo, paths)
-            if not expected_content or current_content != expected_content:
+            if not result_content_is_equivalent(
+                repo, paths, supplemental_parent[1]
+            ):
                 raise ReviewError(
                     "Supplemental review source is not content-equivalent to the "
                     "finalized parent snapshot. Create a normal successor workflow."
@@ -10521,6 +11931,7 @@ def run_review_command(args: argparse.Namespace) -> int:
                 "result_content_fingerprint": content_fingerprint(
                     snapshot_dir, paths
                 ),
+                "result_content_manifest": content_manifest(snapshot_dir, paths),
                 "manifest_sha256": sha256_text(
                     manifest_path.read_text(encoding="utf-8")
                 ),
@@ -10613,54 +12024,24 @@ def run_review_command(args: argparse.Namespace) -> int:
         )
         record_reviewer_prompt_hashes(metadata, reviewer_inputs)
         safe_write_json(run_dir / "metadata.json", metadata)
-        if args.sequential or len(reviewers) == 1:
-            results = [
-                invoke_reviewer(
-                    reviewer,
-                    repo=snapshot_dir,
-                    prompt=reviewer_inputs[reviewer.name][1],
-                    run_dir=run_dir,
-                    input_dir=reviewer_inputs[reviewer.name][0],
-                    timeout_seconds=timeout_seconds,
-                    process_registry=process_registry,
-                )
-                for reviewer in reviewers
-            ]
-        else:
-            executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(reviewers)
+        try:
+            results = invoke_reviewers(
+                reviewers,
+                repo=snapshot_dir,
+                reviewer_inputs=reviewer_inputs,
+                run_dir=run_dir,
+                timeout_seconds=timeout_seconds,
+                sequential=bool(args.sequential),
+                process_registry=process_registry,
             )
-            futures = [
-                executor.submit(
-                    invoke_reviewer,
-                    reviewer,
-                    repo=snapshot_dir,
-                    prompt=reviewer_inputs[reviewer.name][1],
-                    run_dir=run_dir,
-                    input_dir=reviewer_inputs[reviewer.name][0],
-                    timeout_seconds=timeout_seconds,
-                    process_registry=process_registry,
-                )
-                for reviewer in reviewers
-            ]
-            try:
-                results = [future.result() for future in futures]
-            except KeyboardInterrupt:
-                process_registry.signal_all(signal.SIGTERM)
-                _, unfinished = concurrent.futures.wait(
-                    futures,
-                    timeout=REVIEWER_TERMINATION_GRACE_SECONDS,
-                )
-                if unfinished:
-                    process_registry.signal_all(signal.SIGKILL)
-                    concurrent.futures.wait(
-                        unfinished,
-                        timeout=REVIEWER_TERMINATION_GRACE_SECONDS,
-                    )
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
-            else:
-                executor.shutdown(wait=True)
+        except BaseException as exc:
+            persist_completed_peer_results(
+                exc,
+                run_dir=run_dir,
+                metadata=metadata,
+                reviewers=reviewers,
+            )
+            raise
 
         after_paths = changed_paths(repo, scope, path_filters)
         after = fingerprint(repo, scope, after_paths, path_filters)
@@ -10707,17 +12088,16 @@ def run_review_command(args: argparse.Namespace) -> int:
         print(completed_review_next_guidance(run_dir, metadata))
         return 0
     except KeyboardInterrupt:
-        update_metadata(
+        current_status = read_json(run_dir / "metadata.json").get("status")
+        update_terminal_error(
             run_dir,
-            status="failed",
+            error_type="interrupted",
+            message="Review interrupted; owned reviewer process groups were terminated.",
+            status="partial" if current_status == "partial" else "failed",
             completed_at=utc_now(),
             duration_seconds=elapsed_since(
                 str(metadata.get("started_at") or metadata.get("created_at"))
             ),
-            failure={
-                "type": "interrupted",
-                "message": "Review interrupted; reviewer process group terminated.",
-            },
         )
         raise
     except ReviewError as exc:
@@ -10756,8 +12136,13 @@ def run_review_command(args: argparse.Namespace) -> int:
             f"{diagnostic_path}: {type(exc).__name__}"
         ) from exc
     finally:
-        shutil.rmtree(snapshot_workspace, ignore_errors=True)
-        release_workflow_budget_reservation(selected_workflow, run_id)
+        primary_error = sys.exc_info()[1]
+        try:
+            cleanup_private_workspace(
+                run_dir, snapshot_workspace, primary_error=primary_error
+            )
+        finally:
+            release_workflow_budget_reservation(selected_workflow, run_id)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -17,10 +17,18 @@ from ..domain.errors import ReviewError
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    def unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON field {key!r}")
+            value[key] = item
+        return value
+
     try:
         with path.open(encoding="utf-8") as source:
-            value = json.load(source)
-    except (OSError, json.JSONDecodeError) as exc:
+            value = json.load(source, object_pairs_hook=unique_fields)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise ReviewError(f"Cannot read {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ReviewError(f"Expected a JSON object in {path}.")
@@ -54,6 +62,14 @@ def write_json(path: Path, value: dict[str, Any], *, permission_hint: Callable[[
 def write_text(path: Path, content: str, *, permission_hint: Callable[[Path], str]) -> None:
     try:
         path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as exc:
+        raise ReviewError(f"Cannot write private review artifact at {path}: {exc}." + permission_hint(path)) from exc
+
+
+def write_bytes(path: Path, content: bytes, *, permission_hint: Callable[[Path], str]) -> None:
+    try:
+        path.write_bytes(content)
         path.chmod(0o600)
     except OSError as exc:
         raise ReviewError(f"Cannot write private review artifact at {path}: {exc}." + permission_hint(path)) from exc

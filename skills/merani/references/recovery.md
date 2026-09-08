@@ -40,9 +40,12 @@ changed finding still requires a new one-shot scan token.
 ## Failed reviewers and allowance
 
 When Claude reports an authentication failure, run `claude auth status` in the
-same execution boundary before retrying. A terminal login may not be visible in
-the agent sandbox. A definite logged-out preflight consumes no provider attempt;
-an authentication failure after launch remains a recorded attempt.
+same execution boundary before retrying. A `loggedIn: false` result inside the
+Codex sandbox is recorded as `boundary_unavailable`: it does not claim that the
+host Claude session is logged out. Run Merani from the authenticated host
+boundary instead. A definite host logout and a boundary-unavailable preflight
+both consume no provider attempt; an authentication failure after launch remains
+a recorded attempt.
 
 If one reviewer fails after another returns a valid report, the run becomes
 `partial`. Keep the source unchanged and resume it so successful reviewers are
@@ -57,6 +60,16 @@ round already exists. Typed provider failures and the successful reports remain
 in the same run artifact. Every failed and resumed attempt retains its own
 metadata and archived provider artifacts, and every attempt counts toward the
 cumulative provider-attempt ceiling.
+
+An attempt receipt is written atomically before the provider process starts.
+`launch_pending` conservatively consumes headroom if the runner crashes at the
+boundary, then becomes `launched`, `completed`, or `interrupted`. A definite
+process-creation failure settles as `not_started` and is not charged. Receipts
+record whether usage was reported or remains unknown and are preserved
+independently of later source, parsing, or metadata failures. A definite
+preflight block has no receipt and consumes no attempt. `continue` uses these
+facts, so a successful peer is preserved and an indeterminate provider is not
+launched a second time silently.
 
 If Claude reached its native per-review API-equivalent stop, do not blindly
 repeat the same cap or lower both effort and the stop.

@@ -689,7 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     verify = subparsers.add_parser(
-        "verify", help="Check that a finalized PASS still matches current source"
+        "verify",
+        help="Revalidate a final contract, source freshness, and commit binding",
     )
     verify.add_argument("--run", required=True, help="Review run directory")
     recover = subparsers.add_parser(

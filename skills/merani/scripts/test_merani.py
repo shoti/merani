@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -17,6 +19,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -33,6 +36,7 @@ import merani_core.domain.assurance as AM
 import merani_core.domain.review_contract as RC
 from tests.unit.test_architecture import ArchitectureTests
 from tests.unit.test_core_policies import CorePolicyTests
+from tests.unit.test_v1_stability import V1StabilityTests
 from tests.compatibility.test_launcher import LauncherCompatibilityTests
 
 PASSED_CHECK = {
@@ -41,6 +45,23 @@ PASSED_CHECK = {
 }
 
 REQUIRED_CHECKS = [PASSED_CHECK["name"]]
+
+
+def minimal_bundle_identity() -> dict[str, object]:
+    """Declare a deterministic minimal bundle for hand-built artifact fixtures."""
+    manifest = [{"path": "fixture.py", "sha256": "a" * 64}]
+    encoded = json.dumps(
+        manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return {
+        "bundle_identity_version": "merani-bundle-v1",
+        "bundle_scope": "minimal",
+        "bundle_file_count": 1,
+        "bundle_manifest": manifest,
+        "bundle_sha256": hashlib.sha256(
+            b"merani-bundle-v1\0" + encoded
+        ).hexdigest(),
+    }
 
 
 def run(
@@ -200,11 +221,13 @@ class FakeProviderHarness:
                 if args == ["--version"]:
                     if provider == "codex":
                         print("codex-cli 0.148.0")
+                    elif provider == "claude":
+                        print("2.1.263 (Claude Code)")
                     else:
                         print(f"fake-{provider} campaign-1.0")
                     raise SystemExit(0)
                 if provider == "claude" and args == ["--help"]:
-                    print("--effort --max-budget-usd --json-schema --permission-mode --tools --safe-mode --no-session-persistence")
+                    print("--effort --max-budget-usd --json-schema --permission-mode --tools --restricted --no-session-persistence")
                     raise SystemExit(0)
                 if provider == "codex" and args == ["--help"]:
                     print("--ask-for-approval")
@@ -282,6 +305,7 @@ class FakeProviderHarness:
                     target.write_text("provider mutation\n", encoding="utf-8")
                 record = {
                     "sequence": sequence,
+                    "provider_pid": os.getpid(),
                     "provider": provider,
                     "cwd": str(cwd),
                     "args": args,
@@ -2668,16 +2692,26 @@ class RunnerUnitTests(unittest.TestCase):
                 "--json-schema",
                 "--permission-mode",
                 "--tools",
-                "--safe-mode",
+                "--disallowedTools",
+                "--strict-mcp-config",
+                "--mcp-config",
+                "--settings",
+                "--restricted",
                 "--no-session-persistence",
             )
         )
         with mock.patch.object(
             MM.subprocess,
             "run",
-            return_value=subprocess.CompletedProcess(
-                ["claude", "--help"], 0, stdout=help_text, stderr=""
-            ),
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["claude", "--help"], 0, stdout=help_text, stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    ["claude", "--version"], 0,
+                    stdout="2.1.263 (Claude Code)", stderr="",
+                ),
+            ],
         ):
             ready, detail = MM.claude_cli_contract()
         self.assertTrue(ready, detail)
@@ -2945,6 +2979,67 @@ class RunnerUnitTests(unittest.TestCase):
             mock.patch.object(MM.subprocess, "run", return_value=invalid),
         ):
             self.assertEqual(MM.claude_authentication_mode()[0], "unknown")
+
+    def test_claude_authentication_mode_scopes_sandbox_logout(self) -> None:
+        logged_out = subprocess.CompletedProcess(
+            ["claude", "auth", "status"],
+            1,
+            stdout='{"loggedIn":false,"authMethod":"none"}',
+            stderr="",
+        )
+        with (
+            mock.patch.dict(
+                os.environ, {"CODEX_SANDBOX": "seatbelt"}, clear=True
+            ),
+            mock.patch.object(MM.subprocess, "run", return_value=logged_out),
+        ):
+            mode, detail, permitted = MM.claude_authentication_mode()
+        self.assertEqual(mode, "boundary_unavailable")
+        self.assertFalse(permitted)
+        self.assertIn("host Claude session may still be authenticated", detail)
+
+    def test_claude_authentication_probe_uses_supplied_process_environment(self) -> None:
+        subscription = subprocess.CompletedProcess(
+            ["claude", "auth", "status"],
+            0,
+            stdout='{"loggedIn":true,"authMethod":"oauth"}',
+            stderr="",
+        )
+        process_environment = {"HOME": "/test/home", "USER": "tester"}
+        with mock.patch.object(
+            MM.subprocess, "run", return_value=subscription
+        ) as run:
+            mode, _, permitted = MM.claude_authentication_mode(
+                environment=process_environment
+            )
+        self.assertEqual(mode, "subscription")
+        self.assertTrue(permitted)
+        self.assertEqual(run.call_args.kwargs["env"], process_environment)
+
+    def test_readiness_status_exposes_boundary_unavailable(self) -> None:
+        readiness = MM.ProviderReadiness(
+            False,
+            "authentication unavailable in this boundary",
+            authentication_mode="boundary_unavailable",
+        )
+        self.assertEqual(
+            MM.readiness_status(enabled=True, readiness=readiness),
+            "boundary_unavailable",
+        )
+
+    def test_execution_boundary_does_not_use_inherited_network_hint(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SANDBOX_NETWORK_DISABLED": "1"},
+            clear=True,
+        ):
+            self.assertEqual(MM.execution_boundary(), "host_or_unidentified")
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SANDBOX": "seatbelt"},
+            clear=True,
+        ):
+            self.assertEqual(MM.execution_boundary(), "codex_sandbox")
 
     def test_non_probed_claude_usage_does_not_assume_subscription(self) -> None:
         config = json.loads(json.dumps(MM.DEFAULT_CONFIG))
@@ -5272,7 +5367,7 @@ None.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             fake_process = mock.Mock()
-            fake_process.communicate.side_effect = KeyboardInterrupt
+            fake_process.poll.return_value = None
             reviewer = MM.Reviewer(
                 "kimi",
                 ("kimi",),
@@ -5283,6 +5378,11 @@ None.
             with (
                 mock.patch.object(
                     MM.subprocess, "Popen", return_value=fake_process
+                ),
+                mock.patch.object(
+                    MM,
+                    "communicate_with_codex_network_watch",
+                    side_effect=KeyboardInterrupt,
                 ),
                 mock.patch.object(
                     MM,
@@ -6247,12 +6347,17 @@ None.
             filters = ("src",)
             paths = MM.changed_paths(repo, scope, filters)
             fingerprint = MM.fingerprint(repo, scope, paths, filters)
+            fixture_identity = minimal_bundle_identity()
             MM.safe_write_json(
                 run_dir / "metadata.json",
                 {
+                    "schema_version": MM.SCHEMA_VERSION,
                     "required_checks": REQUIRED_CHECKS,
                     "status": "completed",
+                    "run_id": "run-attest",
                     "workflow_id": "wf-attest",
+                    "round": 1,
+                    "phase": "confirmation",
                     "repository": {"root": str(repo), "head": head},
                     "scope": MM.dataclasses.asdict(scope),
                     "path_filters": list(filters),
@@ -6261,6 +6366,8 @@ None.
                     "result_content_fingerprint": MM.content_fingerprint(
                         repo, paths
                     ),
+                    "result_content_manifest": MM.content_manifest(repo, paths),
+                    "runtime_identity": fixture_identity,
                 },
             )
             MM.safe_write_json(
@@ -6270,13 +6377,25 @@ None.
             MM.safe_write_json(
                 run_dir / "final.json",
                 {
-                    "schema_version": 8,
+                    "schema_version": MM.SCHEMA_VERSION,
+                    "run_id": "run-attest",
+                    "workflow_id": "wf-attest",
+                    "round": 1,
+                    "phase": "confirmation",
+                    "authoritative_gate": True,
                     "source_fingerprint": fingerprint,
                     "status": "PASS_CLEAN",
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-attest": "a" * 64},
                     "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
+                    "assurance": {
+                        "classification": "legacy_unassured",
+                        "status": "NOT_EVALUATED",
+                        "sha256": None,
+                    },
+                    "producer_identity": fixture_identity,
+                    "finalizer_identity": fixture_identity,
                 },
             )
 
@@ -7356,6 +7475,7 @@ None.
         )
 
     def test_successor_missing_inherited_repository_cannot_finalize(self) -> None:
+        fixture_identity = minimal_bundle_identity()
         metadata = {
             "required_checks": REQUIRED_CHECKS,
             "workflow_id": "wf-successor",
@@ -7368,6 +7488,8 @@ None.
             "status": "completed",
             "round": 1,
             "phase": "confirmation",
+            "source_fingerprint": "same",
+            "runtime_identity": fixture_identity,
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -7395,6 +7517,11 @@ None.
                 run_dir / "final.json",
                 {
                     "schema_version": MM.SCHEMA_VERSION,
+                    "run_id": "run-one",
+                    "workflow_id": "wf-successor",
+                    "round": 1,
+                    "phase": "confirmation",
+                    "authoritative_gate": True,
                     "status": "PASS_CLEAN",
                     "source_fingerprint": "same",
                     "codex_verdict": "PASS_CLEAN",
@@ -7406,6 +7533,8 @@ None.
                         "status": "NOT_EVALUATED",
                         "sha256": None,
                     },
+                    "producer_identity": fixture_identity,
+                    "finalizer_identity": fixture_identity,
                 },
             )
             MM.safe_write_json(
@@ -8281,6 +8410,7 @@ None.
             "workflow_id": "wf-preflight",
             "review_mode": "deep",
             "phase": "confirmation",
+            "source_fingerprint": "x",
             "failure": {
                 "type": "ReviewError",
                 "message": "Sensitive material requires inspection.",
@@ -9057,12 +9187,17 @@ None.
                 "status": "completed",
                 "created_at": MM.utc_now(),
             }
+            fixture_identity = minimal_bundle_identity()
             final_metadata = {
                 "required_checks": REQUIRED_CHECKS,
                 "run_id": "run-final",
                 "workflow_id": "wf-20260806T000001Z-final",
                 "status": "completed",
+                "round": 1,
+                "phase": "confirmation",
+                "source_fingerprint": "source-final",
                 "created_at": MM.utc_now(),
+                "runtime_identity": fixture_identity,
             }
             stale_metadata = {
                 "run_id": None,
@@ -9092,12 +9227,24 @@ None.
             MM.safe_write_json(
                 final_dir / "final.json",
                 {
-                    "schema_version": 8,
+                    "schema_version": MM.SCHEMA_VERSION,
+                    "run_id": "run-final",
+                    "workflow_id": "wf-20260806T000001Z-final",
+                    "round": 1,
+                    "phase": "confirmation",
+                    "authoritative_gate": True,
                     "status": "PASS_CLEAN",
+                    "source_fingerprint": "source-final",
                     "codex_verdict": "PASS_CLEAN",
                     "triage_status": "PASS_CLEAN",
                     "triage_sha256s": {"run-final": "a" * 64},
                     "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
+                    "assurance": {
+                        "classification": "legacy_unassured",
+                        "status": "NOT_EVALUATED",
+                    },
+                    "producer_identity": fixture_identity,
+                    "finalizer_identity": fixture_identity,
                 },
             )
             MM.safe_write_json(
@@ -9366,6 +9513,7 @@ None.
         self.assertTrue(result["advisory_only"])
 
     def test_workflow_status_distinguishes_ready_to_finalize_and_completed(self) -> None:
+        fixture_identity = minimal_bundle_identity()
         metadata = {
             "required_checks": REQUIRED_CHECKS,
             "workflow_id": "wf-done",
@@ -9374,6 +9522,8 @@ None.
             "status": "completed",
             "round": 2,
             "phase": "confirmation",
+            "source_fingerprint": "x",
+            "runtime_identity": fixture_identity,
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -9386,13 +9536,25 @@ None.
                 "policy": MM.workflow_policy(),
             }
             final_document = {
-                "schema_version": 8,
+                "schema_version": MM.SCHEMA_VERSION,
+                "run_id": "run-done",
+                "workflow_id": "wf-done",
+                "round": 2,
+                "phase": "confirmation",
+                "authoritative_gate": True,
                 "status": "PASS_CLEAN",
                 "source_fingerprint": "x",
                 "codex_verdict": "PASS_CLEAN",
                 "triage_status": "PASS_CLEAN",
                 "triage_sha256s": {"run-done": "a" * 64},
                 "validation": MM.evaluate_checks([PASSED_CHECK], REQUIRED_CHECKS),
+                "assurance": {
+                    "classification": "legacy_unassured",
+                    "status": "NOT_EVALUATED",
+                    "sha256": None,
+                },
+                "producer_identity": fixture_identity,
+                "finalizer_identity": fixture_identity,
             }
             MM.safe_write_json(
                 workflows / "wf-done.json",
@@ -9461,10 +9623,13 @@ None.
         ]:
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
                 run_dir = Path(temporary)
+                fixture_identity = minimal_bundle_identity()
                 MM.safe_write_json(run_dir / "metadata.json", {
                     "required_checks": REQUIRED_CHECKS,
-                    "run_id": "run-checks", "status": "completed",
+                    "run_id": "run-checks", "workflow_id": "wf-checks",
+                    "round": 1, "status": "completed",
                     "phase": "confirmation", "source_fingerprint": "same", "risks": [],
+                    "runtime_identity": fixture_identity,
                 })
                 MM.safe_write_json(run_dir / "triage.json", {"findings": [], "test_gaps": []})
                 check = {"name": "npm test", "status": status,
@@ -9486,7 +9651,17 @@ None.
                     with redirect_stdout(output):
                         result = MM.verify_command(argparse.Namespace(run=str(run_dir)))
                     self.assertEqual(result, 0 if expected == "PASS_CLEAN" else 3)
-                    self.assertEqual(json.loads(output.getvalue())["deployment_ready"], expected == "PASS_CLEAN")
+                    verified = json.loads(output.getvalue())
+                    self.assertEqual(verified["review_commit_ready"], expected == "PASS_CLEAN")
+                    self.assertFalse(verified["deployment_ready"])
+                    receipt = MM.read_json(
+                        run_dir / "verification-receipt.json"
+                    )
+                    self.assertTrue(receipt["verifier_identity_stable"])
+                    self.assertEqual(
+                        receipt["final_sha256"],
+                        MM.sha256_file(run_dir / "final.json"),
+                    )
 
     def test_check_results_reject_malformed_or_contradictory_evidence(self) -> None:
         for checks in [
@@ -9830,7 +10005,7 @@ None.
             }
         )
         self.assertFalse(trusted)
-        self.assertIn("schema_version must be 8 or newer", issues)
+        self.assertTrue(any("schema_version must be a supported integer" in issue for issue in issues))
         self.assertIn("codex_verdict is missing or invalid", issues)
         self.assertIn("triage_status is missing or invalid", issues)
         self.assertIn("triage_sha256s is missing or invalid", issues)
@@ -10704,6 +10879,257 @@ None.
 
 
 class RunnerEndToEndTests(unittest.TestCase):
+    def test_initial_sigint_terminates_sequential_and_parallel_providers(self) -> None:
+        cases = ((True, ("claude",)), (False, ("claude", "kimi")))
+        for sequential, providers in cases:
+            with self.subTest(sequential=sequential), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                harness = FakeProviderHarness(root)
+                repo = root / "repo"
+                repo.mkdir()
+                initialize_repo(repo)
+                (repo / "src/feature.py").write_text(
+                    "VALUE = 2\n", encoding="utf-8"
+                )
+                for provider in providers:
+                    harness.queue(provider, {"kind": "timeout", "seconds": 30})
+                command = [
+                    *harness.base,
+                    "run",
+                    "--repo",
+                    str(repo),
+                    "--uncommitted",
+                    "--task",
+                    "Check the VALUE change.",
+                    "--required-check",
+                    PASSED_CHECK["name"],
+                    "--without-codex",
+                    "--without-antigravity",
+                    "--with-kimi" if "kimi" in providers else "--without-kimi",
+                ]
+                if sequential:
+                    command.append("--sequential")
+                runner = subprocess.Popen(
+                    command,
+                    cwd=repo,
+                    env=harness.environment,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + 8
+                invocations = harness.invocations()
+                while (
+                    len(invocations) < len(providers)
+                    and runner.poll() is None
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+                    invocations = harness.invocations()
+                provider_pids = [int(item["provider_pid"]) for item in invocations]
+                try:
+                    self.assertEqual(len(provider_pids), len(providers))
+                    started = time.monotonic()
+                    runner.send_signal(signal.SIGINT)
+                    out, err = runner.communicate(
+                        timeout=MM.REVIEWER_TERMINATION_GRACE_SECONDS + 3
+                    )
+                    elapsed = time.monotonic() - started
+                except BaseException:
+                    if runner.poll() is None:
+                        os.killpg(runner.pid, signal.SIGKILL)
+                        runner.wait(timeout=2)
+                    for pid in provider_pids:
+                        try:
+                            os.killpg(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    raise
+                run_dir = harness.run_directories()[0]
+                metadata = MM.read_json(run_dir / "metadata.json")
+                alive = []
+                for pid in provider_pids:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        continue
+                    alive.append(pid)
+                    os.killpg(pid, signal.SIGKILL)
+
+                self.assertNotEqual(runner.returncode, 0, out + err)
+                self.assertLess(
+                    elapsed, MM.REVIEWER_TERMINATION_GRACE_SECONDS + 2
+                )
+                self.assertEqual(alive, [])
+                self.assertEqual(metadata["terminal_error"]["type"], "interrupted")
+                self.assertEqual(
+                    [item["state"] for item in metadata["provider_attempts"]],
+                    ["interrupted"] * len(providers),
+                )
+
+    def test_resume_sigint_terminates_owned_provider_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = FakeProviderHarness(root)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness.queue(
+                "claude",
+                {"kind": "malformed_wrapper"},
+                {"kind": "timeout", "seconds": 30},
+            )
+            harness.cli(
+                repo,
+                "run",
+                "--repo",
+                str(repo),
+                "--uncommitted",
+                "--task",
+                "Check the VALUE change.",
+                "--required-check",
+                PASSED_CHECK["name"],
+                "--without-codex",
+                "--without-antigravity",
+                "--without-kimi",
+                check=False,
+                provider_backed=True,
+            )
+            run_dir = harness.run_directories()[0]
+            resumed = subprocess.Popen(
+                [*harness.base, "resume", "--run", str(run_dir)],
+                cwd=repo,
+                env=harness.environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 5
+            invocations = harness.invocations()
+            while len(invocations) < 2 and resumed.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+                invocations = harness.invocations()
+            self.assertEqual(len(invocations), 2)
+            provider_pid = invocations[-1]["provider_pid"]
+            started = time.monotonic()
+            resumed.send_signal(signal.SIGINT)
+            out, err = resumed.communicate(
+                timeout=MM.REVIEWER_TERMINATION_GRACE_SECONDS + 2
+            )
+            elapsed = time.monotonic() - started
+            metadata = MM.read_json(run_dir / "metadata.json")
+            try:
+                os.kill(provider_pid, 0)
+            except ProcessLookupError:
+                provider_alive = False
+            else:
+                provider_alive = True
+
+        self.assertNotEqual(resumed.returncode, 0, out + err)
+        self.assertLess(elapsed, MM.REVIEWER_TERMINATION_GRACE_SECONDS + 1)
+        self.assertFalse(provider_alive)
+        self.assertEqual(metadata["terminal_error"]["type"], "interrupted")
+        self.assertEqual(metadata["provider_attempts"][-1]["state"], "interrupted")
+
+    def test_source_drift_after_provider_return_preserves_attempt_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = FakeProviderHarness(root)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            feature = repo / "src/feature.py"
+            feature.write_text("VALUE = 2\n", encoding="utf-8")
+            shim = harness.bin_dir / "claude"
+            marker = 'report = outcome.get("report", "")'
+            shim.write_text(
+                shim.read_text(encoding="utf-8").replace(
+                    marker,
+                    "if outcome.get('source_drift_path'):\n"
+                    "    pathlib.Path(outcome['source_drift_path']).write_text('VALUE = 3\\n')\n"
+                    + marker,
+                ),
+                encoding="utf-8",
+            )
+            harness.queue(
+                "claude",
+                {
+                    "report": structured_report(),
+                    "source_drift_path": str(feature),
+                },
+            )
+            completed = harness.cli(
+                repo,
+                "run",
+                "--repo",
+                str(repo),
+                "--uncommitted",
+                "--task",
+                "Check the VALUE change.",
+                "--required-check",
+                PASSED_CHECK["name"],
+                "--without-codex",
+                "--without-antigravity",
+                "--without-kimi",
+                check=False,
+                provider_backed=True,
+            )
+            run_dir = harness.run_directories()[0]
+            metadata = MM.read_json(run_dir / "metadata.json")
+            workflow = MM.read_json(
+                harness.home
+                / ".codex/review-runs/workflows"
+                / f"{metadata['workflow_id']}.json"
+            )
+            invocation_count = len(harness.invocations())
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(invocation_count, 1)
+        self.assertEqual(len(metadata["provider_attempts"]), 1)
+        self.assertEqual(metadata["provider_attempts"][0]["state"], "completed")
+        self.assertEqual(metadata["provider_attempts"][0]["outcome"], "returned")
+        self.assertEqual(workflow.get("usage_reservations"), {})
+
+    def test_malformed_provider_wrapper_keeps_private_bounded_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = FakeProviderHarness(root)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness.queue("claude", {"kind": "malformed_wrapper"})
+            completed = harness.cli(
+                repo,
+                "run",
+                "--repo",
+                str(repo),
+                "--uncommitted",
+                "--task",
+                "Check the VALUE change.",
+                "--required-check",
+                PASSED_CHECK["name"],
+                "--without-codex",
+                "--without-antigravity",
+                "--without-kimi",
+                check=False,
+                provider_backed=True,
+            )
+            run_dir = harness.run_directories()[0]
+            diagnostic = MM.read_json(run_dir / "claude.diagnostic.json")
+            artifact_present = (run_dir / diagnostic["stdout"]["artifact"]).exists()
+            attempt_category = MM.read_json(run_dir / "metadata.json")[
+                "provider_attempts"
+            ][0]["failure_category"]
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertGreater(diagnostic["stdout"]["retained_bytes"], 0)
+        self.assertTrue(artifact_present)
+        self.assertEqual(attempt_category, "malformed_response")
+
     def test_logged_out_claude_preflight_records_evidence_without_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -10713,6 +11139,8 @@ class RunnerEndToEndTests(unittest.TestCase):
             (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
             harness = FakeProviderHarness(root)
             harness.environment.pop("ANTHROPIC_API_KEY", None)
+            harness.environment.pop("CODEX_SANDBOX", None)
+            harness.environment.pop("CODEX_SANDBOX_NETWORK_DISABLED", None)
             harness.environment["MM_FAKE_CLAUDE_LOGGED_OUT"] = "1"
             workflow = harness.cli(repo, "workflow", "start").stdout.strip()
             blocked = harness.cli(
@@ -10731,6 +11159,40 @@ class RunnerEndToEndTests(unittest.TestCase):
                 harness.cli(repo, "workflow", "status", workflow, check=False).stdout
             )
             self.assertEqual(state["metrics"]["reviewer_invocations"], 0)
+
+    def test_sandbox_claude_preflight_reports_boundary_without_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.environment.pop("ANTHROPIC_API_KEY", None)
+            harness.environment["CODEX_SANDBOX"] = "seatbelt"
+            harness.environment["MM_FAKE_CLAUDE_LOGGED_OUT"] = "1"
+            workflow = harness.cli(repo, "workflow", "start").stdout.strip()
+            blocked = harness.cli(
+                repo,
+                "run",
+                "--workflow-id",
+                workflow,
+                "--uncommitted",
+                "--required-check",
+                PASSED_CHECK["name"],
+                check=False,
+                provider_backed=True,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("restricted execution boundary", blocked.stderr)
+            self.assertIn(
+                "host Claude session may still be authenticated", blocked.stderr
+            )
+            self.assertNotIn("Claude is not logged in", blocked.stderr)
+            self.assertEqual(harness.invocations(), [])
+            metadata = MM.read_json(harness.run_directories()[0] / "metadata.json")
+            self.assertEqual(metadata["status"], "preflight_blocked")
+            self.assertEqual(metadata.get("provider_attempts"), None)
 
     def test_check_plan_and_informational_observations_through_final_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -12720,7 +13182,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                     repo, "verify", "--run", str(confirmation_dir)
                 ).stdout
             )
-            self.assertTrue(committed_verify["deployment_ready"])
+            self.assertTrue(committed_verify["review_commit_ready"])
+            self.assertFalse(committed_verify["deployment_ready"])
             harness.cli(repo, "workflow", "finalize", workflow_identifier)
             final_status = json.loads(
                 harness.cli(
@@ -12728,7 +13191,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                 ).stdout
             )
             self.assertEqual(final_status["state"], "completed")
-            self.assertTrue(final_status["deployment_ready"])
+            self.assertTrue(final_status["review_commit_ready"])
+            self.assertFalse(final_status["deployment_ready"])
             final = MM.read_json(confirmation_dir / "final.json")
             self.assertEqual(final["status"], "PASS_CLEAN")
             self.assertEqual(final["codex_verdict"], "PASS_CLEAN")
@@ -12916,7 +13380,8 @@ class RunnerEndToEndTests(unittest.TestCase):
             attested_status = json.loads(
                 harness.cli(repos[0], "workflow", "status", workflow).stdout
             )
-            self.assertTrue(attested_status["deployment_ready"])
+            self.assertTrue(attested_status["review_commit_ready"])
+            self.assertFalse(attested_status["deployment_ready"])
             for item in attested_status["repositories"]:
                 self.assertNotIn("deployed", item)
                 self.assertNotIn("remote_branch_equal", item)
@@ -13253,7 +13718,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))
@@ -13435,7 +13900,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     """\
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
-                      echo "fake-claude 1.0"
+                      echo "2.1.263 (Claude Code fixture)"
                       exit 0
                     fi
                     test "$(cat unrelated.txt)" = "clean" || exit 3
@@ -13524,7 +13989,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     """\
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
-                      echo "fake-claude 1.0"
+                      echo "2.1.263 (Claude Code fixture)"
                       exit 0
                     fi
                     test "$(cat src/feature.py)" = "VALUE = 1" || exit 3
@@ -13610,7 +14075,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))
@@ -13711,7 +14176,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     """\
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
-                      echo "fake-claude 1.0"
+                      echo "2.1.263 (Claude Code fixture)"
                       exit 0
                     fi
                     cat >/dev/null
@@ -13814,7 +14279,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     """\
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
-                      echo "fake-claude 1.0"
+                      echo "2.1.263 (Claude Code fixture)"
                       exit 0
                     fi
                     cat >/dev/null
@@ -13871,7 +14336,10 @@ class RunnerEndToEndTests(unittest.TestCase):
             self.assertEqual(
                 metadata["excluded_changed_paths"], ["unrelated.txt"]
             )
-            self.assertEqual(metadata["reviewers"]["claude"]["cli_version"], "fake-claude 1.0")
+            self.assertEqual(
+                metadata["reviewers"]["claude"]["cli_version"],
+                "2.1.263 (Claude Code fixture)",
+            )
             self.assertEqual(metadata["reviewers"]["claude"]["usage"]["total_cost_usd"], 0.01)
             self.assertEqual(
                 metadata["review_policy"]["claude_max_budget_usd"], 1.25
@@ -14245,7 +14713,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))
@@ -14376,7 +14844,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))
@@ -14558,7 +15026,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))
@@ -14723,7 +15191,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                     import pathlib
                     import sys
                     if "--version" in sys.argv:
-                        print("fake-claude 1.0")
+                        print("2.1.263 (Claude Code fixture)")
                         raise SystemExit(0)
                     if sys.argv[1:] == ["auth", "status"]:
                         print(json.dumps({{"loggedIn": True, "authMethod": "oauth"}}))

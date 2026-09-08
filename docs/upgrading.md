@@ -3,6 +3,35 @@
 Merani was previously named Multi-Model Review. The review policy and artifact
 format are unchanged by the rename.
 
+## Upgrading to 1.0
+
+New runs use artifact schema 15, `source-v3` and `content-v2` fingerprints, and
+a `merani-bundle-v1` manifest digest. `runner_sha256` keeps its historical
+launcher-only meaning. Old artifacts remain available for display, but an old
+ambiguous content digest by itself cannot authorize a supplemental review,
+commit attestation, or modern readiness result. Start a linked successor to
+reconstruct evidence against the current source when exact entry evidence is
+missing. New fingerprints reject directories and special filesystem entries in
+the changed-path set because Merani cannot establish byte-equivalence for them;
+replace the entry with a regular file or symlink before review.
+
+`verify` now rejects unsupported future schemas, duplicate JSON fields, invalid
+UTF-8, wrong field types, binding mismatches, unknown PASS-like strings, and a
+stored status that is less conservative than its validated components.
+`review_commit_ready` is the local review-and-commit readiness field.
+`deployment_ready` remains present for compatibility but is deprecated and
+always false because Merani does not perform deployment or runtime checks.
+
+Provider launches now create durable receipts before crossing the process
+boundary. Crashed or interrupted launched attempts consume lineage headroom
+with unknown usage until recovery can reconcile them; definite preflight or
+process-creation failures consume none. Provider output diagnostics are
+private, bounded, and never treated as a valid report when truncated. Claude
+1.0 support requires CLI
+2.1.248 or newer and restricted evaluation mode. Review the current
+[provider matrix](../skills/merani/references/providers.md) before enabling an
+optional provider.
+
 ## Install the renamed plugin
 
 ```bash

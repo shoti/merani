@@ -12,7 +12,11 @@ from ...domain.models import Reviewer
 
 
 def interpret_auth_status(
-    *, api_key_present: bool, returncode: int | None, stdout: str | None,
+    *,
+    api_key_present: bool,
+    returncode: int | None,
+    stdout: str | None,
+    restricted_execution_boundary: bool = False,
 ) -> tuple[str, str, bool]:
     """Return redacted billing mode, detail, and launch permission.
 
@@ -33,11 +37,19 @@ def interpret_auth_status(
     except json.JSONDecodeError:
         payload = None
     if isinstance(payload, dict) and payload.get("loggedIn") is False:
+        if restricted_execution_boundary:
+            return (
+                "boundary_unavailable",
+                "Claude authentication is unavailable in this restricted "
+                "execution boundary; the host Claude session may still be "
+                "authenticated. Run `claude auth status` and Merani from the "
+                "same host boundary before retrying",
+                False,
+            )
         return (
             "unknown",
             "Claude is not logged in; check `claude auth status` in the same "
-            "execution environment and restore login before retrying. A terminal "
-            "login may not be visible inside the agent sandbox",
+            "execution environment and restore login before retrying",
             False,
         )
     if returncode != 0:
@@ -63,7 +75,10 @@ def build(
         json.dumps(schema, separators=(",", ":")), "--model", model,
         "--effort", effort, "--max-budget-usd", str(max_budget_usd),
         "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
-        "--safe-mode", "--no-session-persistence",
+        "--disallowedTools", "mcp__*", "--strict-mcp-config",
+        "--mcp-config", '{"mcpServers":{}}',
+        "--settings", '{"disableAllHooks":true}',
+        "--restricted", "--no-session-persistence",
     ), {}, model, version_of("claude"))
 
 

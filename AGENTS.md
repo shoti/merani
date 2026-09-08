@@ -40,9 +40,17 @@ python3 -m py_compile \
   skills/merani/scripts/review_contract.py \
   skills/merani/scripts/evidence_memory.py \
   skills/merani/scripts/review_metrics.py
+python3 -m compileall -q skills/merani/scripts
+python3 skills/merani/scripts/check_architecture.py
 python3 skills/merani/scripts/test_merani.py
+python3 -m unittest discover \
+  -s skills/merani/scripts/tests \
+  -t skills/merani/scripts
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
+for file in skills/merani/scripts/fixtures/*.json; do
+  python3 -m json.tool "$file" >/dev/null
+done
 git diff --check
 ```
 
