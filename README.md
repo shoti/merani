@@ -75,6 +75,8 @@ to share. See the [security policy](SECURITY.md).
 - [Workflow and commands](skills/merani/SKILL.md)
 - [Review policy](skills/merani/references/review-policy.md)
 - [Contributing and local checks](CONTRIBUTING.md)
+- [Architecture and maintainer map](docs/architecture.md)
+- [Refactoring phases and compatibility checklist](docs/refactoring-plan.md)
 - [Changes](CHANGELOG.md)
 
 Merani is named after the steed in Nikoloz Baratashvili's poem *Merani*.
