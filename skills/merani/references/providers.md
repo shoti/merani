@@ -94,6 +94,11 @@ bundled Python command. Run `doctor` before the first review in a session when
 CLI availability or model configuration is uncertain. It checks plugin/cache
 parity, private storage modes, CLI flags, and static readiness; `doctor --live`
 adds a tiny Claude probe capped at $0.10 and probes any other enabled provider.
+Claude's non-billable auth status is checked before launch and resume. A
+definite `loggedIn: false` blocks before a provider attempt is reserved or
+started, including when the status command exits nonzero. An unavailable or
+unparseable status remains `unknown` for compatibility; it is not evidence of
+a working login.
 Inspect the reported runtime plugin version, root, runner path, and SHA-256.
 Artifacts persist the same identity. During local plugin development, invoke
 the intended source runner directly; a cached runner can prove parity only for

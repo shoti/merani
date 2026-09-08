@@ -15,12 +15,13 @@ concurrency:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -32,14 +33,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Compile runner
-        run: >-
-          python -m py_compile
-          skills/merani/scripts/merani.py
-          skills/merani/scripts/assurance.py
-          skills/merani/scripts/review_contract.py
-          skills/merani/scripts/evidence_memory.py
-          skills/merani/scripts/review_metrics.py
+      - name: Compile all Python modules
+        run: python -m compileall -q skills/merani/scripts
+
+      - name: Enforce architecture boundaries
+        run: python skills/merani/scripts/check_architecture.py
 
       - name: Validate JSON
         run: |
@@ -53,3 +51,11 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python skills/merani/scripts/test_merani.py
+
+      - name: Verify nested test discovery
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python -m unittest discover
+          -s skills/merani/scripts/tests
+          -t skills/merani/scripts

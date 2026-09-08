@@ -1,0 +1,1 @@
+"""Side-effecting Merani adapters."""

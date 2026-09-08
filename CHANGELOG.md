@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Introduce the internal `merani_core` modular-monolith package. Runtime paths,
+  pure workflow/budget/gate policy, provider commands and response decoding,
+  private storage and locks, query caches, and CLI presentation now have named
+  owners while the existing launcher, state formats, and safety gates remain
+  compatible. Add dependency/cycle checks and nested test discovery on Linux
+  and macOS with Python 3.12 and 3.13.
+- Preserve the pending authentication-readiness invariant independently in the
+  extracted Claude adapter: definite logged-out status blocks before launch,
+  while unavailable or unparseable status remains unknown and permitted.
+
 - Pin required check names on each repository's first review with `--required-check`.
   Missing declared results block finalization; confirmation, supplemental reviews,
   and reused successor contracts retain the list. Results remain controller-reported.

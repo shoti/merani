@@ -11,8 +11,12 @@ tests: the suite uses fake reviewer CLIs and does not spend provider credits.
 ```bash
 git clone https://github.com/shoti/merani.git
 cd merani
-python3 -m py_compile skills/merani/scripts/*.py
+python3 -m compileall -q skills/merani/scripts
+python3 skills/merani/scripts/check_architecture.py
 python3 skills/merani/scripts/test_merani.py
+python3 -m unittest discover \
+  -s skills/merani/scripts/tests \
+  -t skills/merani/scripts
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 git diff --check
@@ -41,5 +45,9 @@ copy too. Live provider tests are optional and must be explicitly requested.
 Add regression tests for behavior changes, update affected command documentation,
 and report what you tested. Keep unrelated refactors out of the same PR.
 Do not commit credentials, private review artifacts, or generated caches.
+
+See [the architecture map](docs/architecture.md) for module ownership and
+[the staged extraction plan](docs/refactoring-plan.md) before moving runner
+behavior across a lock, process, or persistence boundary.
 
 Report vulnerabilities through [SECURITY.md](SECURITY.md).
