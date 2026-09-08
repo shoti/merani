@@ -197,6 +197,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format; compact links matches while JSON keeps complete evidence",
     )
 
+    reflection = subparsers.add_parser(
+        "reflection",
+        help="Read or regenerate deterministic private controller feedback",
+    )
+    reflection_subparsers = reflection.add_subparsers(
+        dest="reflection_command", required=True
+    )
+    reflection_regenerate = reflection_subparsers.add_parser(
+        "regenerate",
+        help="Rebuild reflection artifacts from bounded persisted run evidence",
+    )
+    reflection_regenerate.add_argument("--run", required=True)
+    reflection_show = reflection_subparsers.add_parser(
+        "show", help="Read a reflection and report whether its inputs are current"
+    )
+    reflection_show.add_argument("--run", required=True)
+    reflection_show.add_argument(
+        "--format", dest="output_format", choices=("json", "markdown"), default="json"
+    )
+
     continuation = subparsers.add_parser(
         "continue",
         help=(

@@ -118,6 +118,21 @@ Incomplete confirmation coverage needs a fresh review or concrete Codex evidence
 for the uncovered area. Changes after confirmation require a linked successor;
 read [recovery.md](references/recovery.md) for these cases.
 
+### 4. Inspect controller reflection
+
+After durable run lifecycle updates Merani writes private `reflection.json` and
+`reflection.md`. This is deterministic evidence-based controller feedback, not a
+reviewer, provider call, final gate, or proof of accuracy. Read it with:
+
+```bash
+merani reflection show --run <run-dir> --format json
+```
+
+Regenerate from existing bounded artifacts with `merani reflection regenerate
+--run <run-dir>`. Regeneration consumes no attempt and cannot change triage,
+assurance, final, verification, workflow, or commit authority. A stale display
+exits 3. Reflection publication warnings never replace the primary command exit.
+
 ## Boundaries
 
 - Reviewers inspect private immutable snapshots using read/search tools only.
@@ -141,6 +156,8 @@ read [recovery.md](references/recovery.md) for these cases.
   bundle digest, and launch-time provider receipts. Historical artifacts remain
   readable, but legacy content hashes alone cannot establish byte equivalence
   for a new attestation or supplemental review.
+- Reflection is Codex-only derived evidence. Never include it in reviewer input,
+  count it as provider report bytes, or use it to bypass confirmation/freshness.
 
 ## Return a useful result
 

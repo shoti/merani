@@ -13,6 +13,8 @@ findings, and keep the result tied to the code that was reviewed.
 3. A fresh review checks the final changes.
 4. Merani saves the reports and decisions. Later changes to the reviewed scope
    invalidate the result.
+5. Merani writes private, evidence-bound controller feedback after run lifecycle
+   updates without calling another provider or changing the final gate.
 
 Claude Code is the default reviewer. A separate Codex session, Antigravity
 (Gemini), and Kimi are optional. The Codex option gives you a fresh session,
@@ -88,6 +90,8 @@ See [reviewer configuration](skills/merani/references/providers.md).
 - [Workflow and commands](skills/merani/SKILL.md)
 - [Review policy](skills/merani/references/review-policy.md)
 - [Contributing and local checks](CONTRIBUTING.md)
+- [Offline testing sandbox](docs/testing.md)
+- [Private post-run reflection](docs/reflection.md)
 - [Architecture and maintainer map](docs/architecture.md)
 - [Refactoring phases and compatibility checklist](docs/refactoring-plan.md)
 - [Changes](CHANGELOG.md)

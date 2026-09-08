@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: ["main", "shoti/merani-v1-stability-*"]
+    branches:
+      - "main"
+      - "shoti/merani-v1-stability-*"
+      - "shoti/merani-testing-feedback-*"
   pull_request:
   workflow_dispatch:
 
@@ -43,7 +46,12 @@ jobs:
         run: |
           python -m json.tool .codex-plugin/plugin.json >/dev/null
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
+          python -m json.tool skills/merani/references/reflection.schema.json >/dev/null
+          python -m json.tool skills/merani/references/campaign-record.schema.json >/dev/null
           for file in skills/merani/scripts/fixtures/*.json; do
+            python -m json.tool "$file" >/dev/null
+          done
+          for file in skills/merani/scripts/campaign/*.json; do
             python -m json.tool "$file" >/dev/null
           done
 
@@ -59,3 +67,26 @@ jobs:
           python -m unittest discover
           -s skills/merani/scripts/tests
           -t skills/merani/scripts
+
+      - name: Run quick offline campaign
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python skills/merani/scripts/merani_campaign.py quick
+          --launcher "$GITHUB_WORKSPACE/skills/merani/scripts/merani.py"
+          --output-dir "$RUNNER_TEMP/merani-campaign"
+          --seed 20260908
+
+      - name: Retain sanitized campaign failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: merani-campaign-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            ${{ runner.temp }}/merani-campaign/campaign-*/campaign-summary.json
+            ${{ runner.temp }}/merani-campaign/campaign-*/campaign-report.md
+            ${{ runner.temp }}/merani-campaign/campaign-*/finding-ledger.json
+            ${{ runner.temp }}/merani-campaign/campaign-*/records/
+            ${{ runner.temp }}/merani-campaign/campaign-*/evidence/
+          if-no-files-found: ignore
+          retention-days: 7

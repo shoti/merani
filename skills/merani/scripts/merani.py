@@ -121,6 +121,11 @@ from merani_core.adapters.storage import (
     write_json as write_artifact_json,
     write_text as write_artifact_text,
 )
+from merani_core.adapters.reflection import (
+    generate as generate_run_reflection,
+    is_current as reflection_is_current,
+)
+from merani_core.domain.reflection import render_markdown as render_reflection_markdown
 from merani_core.application.query_session import QuerySession
 from merani_core.application.workflows import (
     plan_workflow_continuation,
@@ -554,6 +559,68 @@ def private_state_permission_hint(path: Path) -> str:
 
 def safe_write_json(path: Path, value: dict[str, Any]) -> None:
     write_artifact_json(path, value, permission_hint=private_state_permission_hint)
+
+
+def refresh_run_reflection(
+    run_dir: Path,
+    *,
+    operation: str,
+    advisory: bool = True,
+) -> dict[str, Any] | None:
+    """Regenerate derived controller feedback without changing primary outcome."""
+    try:
+        return generate_run_reflection(
+            run_dir,
+            generated_at=utc_now(),
+            operation=operation,
+            reflector_identity=runtime_identity(),
+            permission_hint=private_state_permission_hint,
+        )
+    except Exception as exc:
+        if not advisory:
+            if isinstance(exc, ReviewError):
+                raise
+            raise ReviewError(
+                f"Reflection generation failed ({type(exc).__name__})."
+            ) from exc
+        print(
+            "warning: private reflection generation failed "
+            f"({type(exc).__name__}); the primary command outcome is unchanged",
+            file=sys.stderr,
+        )
+        return None
+
+
+def reflection_command(args: argparse.Namespace) -> int:
+    run_dir = resolve_run_dir(args.run)
+    if args.reflection_command == "regenerate":
+        document = refresh_run_reflection(
+            run_dir, operation="manual_regeneration", advisory=False
+        )
+        assert document is not None
+        print(json.dumps({
+            "run_dir": str(run_dir),
+            "reflection": str(run_dir / "reflection.json"),
+            "markdown": str(run_dir / "reflection.md"),
+            "current": True,
+        }, indent=2))
+        return 0
+    path = run_dir / "reflection.json"
+    if not path.is_file():
+        raise ReviewError(
+            f"Run has no reflection.json: {run_dir}. Use reflection regenerate."
+        )
+    document = read_json(path)
+    current = reflection_is_current(run_dir, document)
+    shown = dict(document)
+    shown["display_state"] = "current" if current else "stale"
+    if args.output_format == "markdown":
+        if not current:
+            print("WARNING: this reflection is stale; regenerate it before relying on derived conclusions.\n")
+        print(render_reflection_markdown(shown), end="")
+    else:
+        print(json.dumps(shown, indent=2, sort_keys=True))
+    return 0 if current else 3
 
 
 @contextmanager
@@ -11313,9 +11380,12 @@ def resume_review_locked(
                 run_dir, snapshot_workspace, primary_error=primary_error
             )
         finally:
-            release_workflow_budget_reservation(
-                str(metadata["workflow_id"]), str(metadata["run_id"])
-            )
+            try:
+                release_workflow_budget_reservation(
+                    str(metadata["workflow_id"]), str(metadata["run_id"])
+                )
+            finally:
+                refresh_run_reflection(run_dir, operation="resume")
 
 
 def run_review_command(args: argparse.Namespace) -> int:
@@ -12142,7 +12212,10 @@ def run_review_command(args: argparse.Namespace) -> int:
                 run_dir, snapshot_workspace, primary_error=primary_error
             )
         finally:
-            release_workflow_budget_reservation(selected_workflow, run_id)
+            try:
+                release_workflow_budget_reservation(selected_workflow, run_id)
+            finally:
+                refresh_run_reflection(run_dir, operation="run")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12185,6 +12258,8 @@ def main() -> int:
         "memory.rebuild": rebuild_memory_command,
         "memory.compact": memory_compact_command,
         "memory.search": memory_search_command,
+        "reflection.regenerate": reflection_command,
+        "reflection.show": reflection_command,
         "workflow.start": workflow_start_command,
         "workflow.status": workflow_status_command,
         "workflow.raise-provider-attempt-limit": workflow_raise_provider_attempt_limit_command,
@@ -12204,7 +12279,21 @@ def main() -> int:
         "run": run_review_command,
     }
     try:
-        return dispatch_cli_command(args, handlers)
+        result = dispatch_cli_command(args, handlers)
+        if args.command in {
+            "decide", "decide-batch", "assure", "assure-batch",
+            "finalize", "verify", "recover", "attest-commit",
+        }:
+            refresh_run_reflection(
+                resolve_run_dir(args.run), operation=str(args.command)
+            )
+        elif args.command == "gate":
+            for run_dir, _ in latest_workflow_attempts(args.workflow_id):
+                refresh_run_reflection(run_dir, operation="gate")
+        elif args.command == "workflow" and args.workflow_command == "finalize":
+            for run_dir, _ in latest_workflow_attempts(args.workflow_id):
+                refresh_run_reflection(run_dir, operation="workflow_finalize")
+        return result
     except KeyboardInterrupt:
         print("error: review interrupted", file=sys.stderr)
         return 130

@@ -17,6 +17,10 @@ def run_artifact_bytes(run_dir: Path) -> dict[str, int]:
     result["prompt_bytes"] = path_size(run_dir / "prompt.md")
     result["manifest_bytes"] = path_size(run_dir / "manifest.md")
     result["patch_bytes"] = path_size(run_dir / "change.patch")
-    result["reviewer_report_bytes"] = sum(path_size(path) for path in run_dir.glob("*.md") if path.name not in {"prompt.md", "manifest.md"})
+    result["reviewer_report_bytes"] = sum(
+        path_size(path)
+        for path in run_dir.glob("*.md")
+        if path.name not in {"prompt.md", "manifest.md", "reflection.md"}
+    )
     result["raw_response_bytes"] = sum(path_size(path) for pattern in ("*.raw.json", "*.raw.jsonl") for path in run_dir.glob(pattern))
     return result

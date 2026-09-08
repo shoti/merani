@@ -1,0 +1,15 @@
+{
+  "schema_version": "merani-synthetic-ground-truth-v1",
+  "defects": [
+    {
+      "id": "SYNTH-001",
+      "path": "src/arithmetic.py",
+      "trigger": "subtract(7, 2)",
+      "expected": 5,
+      "seeded_observed": 9,
+      "description": "The seeded subtraction branch adds its operands."
+    }
+  ],
+  "discovery_claim": false,
+  "note": "The executable oracle and this manifest remain outside generated reviewer snapshots. Queued fake findings test mechanics, not AI discovery."
+}

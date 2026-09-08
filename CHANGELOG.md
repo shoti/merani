@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a reusable offline external-Git campaign with isolated fake providers,
+  replayable evidence and bounded performance profiles. Generate private,
+  evidence-bound post-run reflections without provider calls or gate authority.
+
 - Prepare the 1.0 stability contract: versioned unambiguous source/content
   fingerprints, independent entry manifests for commit equivalence, strict
   persisted-final validation, and conservative rejection of insufficient

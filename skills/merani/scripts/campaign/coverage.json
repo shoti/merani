@@ -1,0 +1,92 @@
+{
+  "schema_version": "merani-campaign-coverage-v1",
+  "families": [
+    {
+      "id": "repair-triage-checks-confirmation-gate-commit",
+      "external_scenarios": ["clean-gate", "seeded-defect"],
+      "existing_regressions": [
+        "test_check_plan_and_informational_observations_through_final_gate",
+        "test_required_checks_control_finalize_and_committed_readiness",
+        "test_initial_commit_is_equivalent_to_reviewed_unborn_tree"
+      ]
+    },
+    {
+      "id": "logout-and-preflight",
+      "external_scenarios": ["logged-out"],
+      "existing_regressions": [
+        "test_logged_out_claude_preflight_records_evidence_without_attempt",
+        "test_preflight_blocks_are_not_counted_as_failed_reviews"
+      ]
+    },
+    {
+      "id": "response-failures-and-output-bounds",
+      "external_scenarios": ["malformed-resume", "invalid-utf8"],
+      "existing_regressions": [
+        "test_malformed_provider_wrapper_keeps_private_bounded_diagnostics",
+        "test_codex_silent_process_still_honors_review_timeout",
+        "test_provider_output_is_bounded_and_truncation_cannot_pass"
+      ]
+    },
+    {
+      "id": "process-lifecycle-and-persistence",
+      "external_scenarios": ["malformed-resume"],
+      "existing_regressions": [
+        "test_initial_sigint_terminates_sequential_and_parallel_providers",
+        "test_resume_sigint_terminates_owned_provider_process",
+        "test_unexpected_resume_error_preserves_partial_metadata"
+      ]
+    },
+    {
+      "id": "recovery-and-concurrent-admission",
+      "external_scenarios": ["malformed-resume"],
+      "existing_regressions": [
+        "test_concurrent_review_start_rejects_existing_preflight",
+        "test_concurrent_resume_commands_do_not_overlap",
+        "test_workflow_budget_reservations_are_atomic"
+      ]
+    },
+    {
+      "id": "drift-and-tampering",
+      "external_scenarios": ["clean-gate"],
+      "existing_regressions": [
+        "test_source_drift_after_provider_return_preserves_attempt_receipt",
+        "test_passing_final_cannot_hide_a_failed_check_or_forged_summary",
+        "test_legacy_final_contract_is_untrusted"
+      ]
+    },
+    {
+      "id": "sensitive-content-and-path-confinement",
+      "external_scenarios": [],
+      "existing_regressions": [
+        "test_secret_assignment_is_blocked_in_cli_flow",
+        "test_secret_scan_covers_large_files_and_deleted_yaml",
+        "test_external_snapshot_symlink_is_blocked",
+        "test_path_filters_reject_glob_and_pathspec_magic"
+      ]
+    },
+    {
+      "id": "multi-repository-and-historical-artifacts",
+      "external_scenarios": ["multi-repository-incomplete"],
+      "existing_regressions": [
+        "test_multi_repository_freshness_and_successor_campaign",
+        "test_evidence_memory_rebuild_reports_skipped_malformed_runs"
+      ]
+    },
+    {
+      "id": "storage-publication-failures",
+      "external_scenarios": [],
+      "existing_regressions": [
+        "test_failed_publication_leaves_no_partial_temporary_file",
+        "test_concurrent_regeneration_serializes_complete_pairs"
+      ]
+    },
+    {
+      "id": "repository-size-and-workflow-history",
+      "external_scenarios": ["stress"],
+      "existing_regressions": [
+        "test_analytics_reports_lineage_outcomes_and_run_finals",
+        "test_workflow_query_cache_reads_run_metadata_once"
+      ]
+    }
+  ]
+}

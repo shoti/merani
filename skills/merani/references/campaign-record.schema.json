@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shoti/merani/campaign-record.schema.json",
+  "title": "Merani offline campaign record v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "scenario_version",
+    "seed",
+    "baseline_sha",
+    "candidate_sha",
+    "bundle_identity",
+    "platform",
+    "fixture_manifest",
+    "commands",
+    "started_at",
+    "ended_at",
+    "duration_seconds",
+    "exit_status",
+    "scenario_status",
+    "expected",
+    "observed",
+    "provider_invocation_count"
+  ],
+  "properties": {
+    "schema_version": {"const": "merani-campaign-record-v1"},
+    "scenario_id": {"type": "string"},
+    "scenario_version": {"type": "integer", "minimum": 1},
+    "seed": {"type": "integer"},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "exit_status": {"type": "integer"},
+    "scenario_status": {"enum": ["passed", "failed"]},
+    "provider_invocation_count": {"type": "integer", "minimum": 0},
+    "commands": {"type": "array"},
+    "fixture_manifest": {"type": "array"}
+  }
+}

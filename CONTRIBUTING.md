@@ -22,8 +22,20 @@ python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 for file in skills/merani/scripts/fixtures/*.json; do
   python3 -m json.tool "$file" >/dev/null
 done
+for file in skills/merani/scripts/campaign/*.json \
+  skills/merani/references/*.schema.json; do
+  python3 -m json.tool "$file" >/dev/null
+done
+python3 skills/merani/scripts/merani_campaign.py quick \
+  --launcher "$PWD/skills/merani/scripts/merani.py" \
+  --output-dir /private/tmp/merani-campaign \
+  --seed 20260908
 git diff --check
 ```
+
+The quick campaign is offline and exercises the public CLI in external private
+Git fixtures. See [the sandbox contract](docs/testing.md) for selected cases,
+stress mode, replay, retention, and exact-root cleanup.
 
 For local installation:
 
