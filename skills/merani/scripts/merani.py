@@ -31,11 +31,19 @@ import time
 import traceback
 import uuid
 from typing import Any, Iterable, Sequence
-from validation import (
+
+# ``python path/to/merani.py`` adds this directory automatically. Explicit
+# import-by-path callers do not, so establish the same local-package boundary
+# before importing ``merani_core``.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from merani_core.domain.validation import (
     ValidationError, evaluate_checks, normalize_required_checks, parse_check_result,
 )
 
-from assurance import (
+from merani_core.domain.assurance import (
     AssuranceError,
     build_contract as build_assurance_contract,
     evaluate as evaluate_assurance,
@@ -45,13 +53,13 @@ from assurance import (
     validate_contract as validate_assurance_contract,
     validate_decisions as validate_assurance_decisions,
 )
-from review_contract import (
+from merani_core.domain.review_contract import (
     CLAUDE_REVIEW_SCHEMA,
     parse_review_report,
     parsed_report_is_invalid,
     render_structured_review,
 )
-from evidence_memory import (
+from merani_core.adapters.evidence_memory import (
     compact as compact_evidence_memory,
     normalized_text,
     rebuild as rebuild_evidence_memory,
@@ -60,7 +68,7 @@ from evidence_memory import (
     status as evidence_memory_status,
     upsert_run as upsert_evidence_run,
 )
-from review_metrics import (
+from merani_core.domain.metrics import (
     ARTIFACT_BYTE_FIELDS,
     TOKEN_FIELDS,
     add_artifact_bytes,
@@ -69,70 +77,79 @@ from review_metrics import (
     empty_token_usage,
     normalized_usage_tokens,
     numeric_distribution,
-    path_size,
-    run_artifact_bytes,
     tokens_from_mapping as _tokens_from_mapping,
 )
-
-
-class ReviewError(RuntimeError):
-    """A user-actionable review runner failure."""
+from merani_core.adapters.storage_metrics import path_size, run_artifact_bytes
+from merani_core.bootstrap import build as build_bootstrap
+from merani_core.domain.errors import ReviewError
+from merani_core.domain.models import (
+    ProviderReadiness,
+    Reviewer,
+    ReviewResult,
+    Scope,
+    SensitiveFinding,
+)
+from merani_core.settings import _state_dir
+from merani_core.domain.budget_policy import (
+    adjust_legacy_workflow_budget,
+    assess_review_admission,
+    enforce_review_admission as enforce_review_admission_policy,
+)
+from merani_core.domain.gate_policy import (
+    conservative_gate_status as choose_conservative_gate_status,
+    final_contract_trust as evaluate_final_contract_trust,
+    final_gate_status as evaluate_final_gate_status,
+)
+from merani_core.domain.workflow_policy import (
+    build_workflow_policy,
+    required_successful_provider_rounds as required_provider_rounds,
+    review_mode_from_policy as choose_review_mode,
+    review_mode_with_origin as choose_review_mode_with_origin,
+)
+from merani_core.adapters.providers.registry import (
+    build_reviewers as build_provider_reviewers,
+    decode_output as decode_provider_output,
+)
+from merani_core.adapters.providers.claude import interpret_auth_status
+from merani_core.adapters.locking import (
+    exclusive_file_lock as locked_file,
+    exclusive_file_locks as locked_files,
+)
+from merani_core.adapters.storage import (
+    read_json as read_artifact_json,
+    write_json as write_artifact_json,
+    write_text as write_artifact_text,
+)
+from merani_core.application.query_session import QuerySession
+from merani_core.application.workflows import (
+    plan_workflow_continuation,
+)
+from merani_core.presentation.cli import build_parser as build_cli_parser
+from merani_core.presentation.commands import dispatch as dispatch_cli_command
 
 
 def state_dir_from_environment(
     name: str, default: Path, *, legacy_name: str | None = None
 ) -> Path:
     """Resolve one private state directory without cwd-dependent ambiguity."""
-    raw_value = os.environ.get(name)
-    if raw_value is None and legacy_name is not None:
-        name = legacy_name
-        raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default.expanduser().resolve()
-    candidate = Path(raw_value).expanduser()
-    if not candidate.is_absolute():
-        raise ReviewError(
-            f"{name} must be an absolute path, got {raw_value!r}."
-        )
-    return candidate.resolve()
+    return _state_dir(os.environ, name, default, legacy_name=legacy_name)
 
 
-# Keep existing reviewer preferences and provider health after the rename.
-_LEGACY_CONFIG_DIR = Path.home() / ".config" / "multi-model-review"
-CONFIG_DIR = state_dir_from_environment(
-    "MERANI_CONFIG_DIR",
-    _LEGACY_CONFIG_DIR if _LEGACY_CONFIG_DIR.exists() else Path.home() / ".config" / "merani",
-    legacy_name="MM_REVIEW_CONFIG_DIR",
-)
-CONFIG_PATH = CONFIG_DIR / "config.json"
-PROVIDER_HEALTH_PATH = CONFIG_DIR / "provider-health.json"
-RUNS_DIR = state_dir_from_environment(
-    "MERANI_RUNS_DIR",
-    Path.home() / ".codex" / "review-runs",
-    legacy_name="MM_REVIEW_RUNS_DIR",
-)
-WORKFLOWS_DIR = RUNS_DIR / "workflows"
-SENSITIVE_SCANS_DIR = RUNS_DIR / "sensitive-scans"
-_COMMAND_RUN_METADATA_CACHE: list[tuple[Path, dict[str, Any]]] | None = None
-_COMMAND_RUNS_BY_WORKFLOW: dict[str, list[tuple[Path, dict[str, Any]]]] | None = None
-_COMMAND_WORKFLOW_ANCESTRY_CACHE: dict[str, list[str]] | None = None
-_COMMAND_WORKFLOW_ROOT_CACHE: dict[str, str] | None = None
-_COMMAND_LINEAGE_GROUPS: dict[str, set[str]] | None = None
-_COMMAND_LINEAGE_GROUPS_READY = False
+_BOOTSTRAP = build_bootstrap(Path(__file__))
+CONFIG_DIR = _BOOTSTRAP.paths.config_dir
+CONFIG_PATH = _BOOTSTRAP.paths.config_path
+PROVIDER_HEALTH_PATH = _BOOTSTRAP.paths.provider_health_path
+RUNS_DIR = _BOOTSTRAP.paths.runs_dir
+WORKFLOWS_DIR = _BOOTSTRAP.paths.workflows_dir
+SENSITIVE_SCANS_DIR = _BOOTSTRAP.paths.sensitive_scans_dir
+_COMMAND_QUERY_SESSION: QuerySession | None = None
 MINIMUM_PYTHON = (3, 12)
-SKILL_DIR = Path(__file__).resolve().parent.parent
-PLUGIN_ROOT = SKILL_DIR.parents[1]
-KIMI_AGENT_PATH = SKILL_DIR / "references" / "kimi-reviewer.md"
-ANTIGRAVITY_AGENT_PATH = SKILL_DIR / "references" / "antigravity-agent.md"
+SKILL_DIR = _BOOTSTRAP.paths.skill_dir
+PLUGIN_ROOT = _BOOTSTRAP.paths.plugin_root
+KIMI_AGENT_PATH = _BOOTSTRAP.paths.kimi_agent_path
+ANTIGRAVITY_AGENT_PATH = _BOOTSTRAP.paths.antigravity_agent_path
 ANTIGRAVITY_AGENT_NAME = "merani-read-only-v1"
-ANTIGRAVITY_AGENT_INSTALL_PATH = (
-    Path.home()
-    / ".gemini"
-    / "config"
-    / "agents"
-    / ANTIGRAVITY_AGENT_NAME
-    / "agent.md"
-)
+ANTIGRAVITY_AGENT_INSTALL_PATH = _BOOTSTRAP.paths.antigravity_agent_install_path
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "claude": {
@@ -355,59 +372,6 @@ class ReviewerProcessRegistry:
                 continue
 
 
-@dataclasses.dataclass(frozen=True)
-class Scope:
-    kind: str
-    value: str | None
-    label: str
-
-
-@dataclasses.dataclass(frozen=True)
-class Reviewer:
-    name: str
-    command: tuple[str, ...]
-    environment: dict[str, str]
-    model: str
-    cli_version: str
-
-
-@dataclasses.dataclass(frozen=True)
-class ReviewResult:
-    name: str
-    returncode: int
-    report_path: Path
-    error_path: Path
-    started_at: str
-    completed_at: str
-    duration_seconds: float
-    timed_out: bool
-    usage: dict[str, Any] | None
-    failure_category: str | None = None
-
-
-@dataclasses.dataclass(frozen=True)
-class ProviderReadiness:
-    ready: bool | None
-    detail: str
-    models: tuple[str, ...] = ()
-    authentication_mode: str = "unknown"
-    usage_resource: str = "unknown"
-
-
-@dataclasses.dataclass(frozen=True)
-class SensitiveFinding:
-    identifier: str
-    path: str
-    line: int
-    rule: str
-    key: str | None = None
-    content_sha256: str = ""
-
-    def display(self) -> str:
-        key = f", key={self.key}" if self.key else ""
-        return f"{self.path}:{self.line} [{self.rule}{key}] ({self.identifier})"
-
-
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -425,14 +389,7 @@ def sha256_file(path: Path) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    try:
-        with path.open(encoding="utf-8") as source:
-            value = json.load(source)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ReviewError(f"Cannot read {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ReviewError(f"Expected a JSON object in {path}.")
-    return value
+    return read_artifact_json(path)
 
 
 def runtime_identity(
@@ -471,100 +428,33 @@ def private_state_permission_hint(path: Path) -> str:
 
 
 def safe_write_json(path: Path, value: dict[str, Any]) -> None:
-    temporary_path: Path | None = None
-    primary_error: OSError | None = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.name}-", suffix=".tmp", dir=path.parent
-        )
-        temporary_path = Path(temporary_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as target:
-            json.dump(value, target, indent=2, sort_keys=True, allow_nan=False)
-            target.write("\n")
-        temporary_path.chmod(0o600)
-        temporary_path.replace(path)
-    except OSError as exc:
-        primary_error = exc
-        hint = private_state_permission_hint(path)
-        raise ReviewError(
-            f"Cannot write private review state at {path}: {exc}.{hint}"
-        ) from exc
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                if primary_error is None:
-                    raise ReviewError(
-                        "Cannot clean up private review state at "
-                        f"{temporary_path}: {cleanup_error}."
-                        + private_state_permission_hint(path)
-                    ) from cleanup_error
+    write_artifact_json(path, value, permission_hint=private_state_permission_hint)
 
 
 @contextmanager
 def exclusive_file_locks(targets: Sequence[Path]) -> Any:
-    """Lock one or more state files in stable order across runner processes."""
-    descriptors: list[int] = []
-    try:
-        for target in sorted(set(targets), key=str):
-            lock_path = target.with_name(f".{target.name}.lock")
-            try:
-                lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            except OSError as exc:
-                raise ReviewError(
-                    f"Cannot lock private review state at {lock_path}: {exc}."
-                    + private_state_permission_hint(lock_path)
-                ) from exc
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            descriptors.append(descriptor)
+    with locked_files(targets, permission_hint=private_state_permission_hint):
         yield
-    finally:
-        for descriptor in reversed(descriptors):
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
 
 @contextmanager
 def exclusive_file_lock(target: Path) -> Any:
-    """Serialize a read-modify-write transaction across runner processes."""
-    with exclusive_file_locks((target,)):
+    with locked_file(target, permission_hint=private_state_permission_hint):
         yield
 
 
 @contextmanager
 def workflow_query_cache() -> Any:
     """Reuse one immutable artifact/workflow view during read-only reporting."""
-    global _COMMAND_RUN_METADATA_CACHE
-    global _COMMAND_RUNS_BY_WORKFLOW
-    global _COMMAND_WORKFLOW_ANCESTRY_CACHE
-    global _COMMAND_WORKFLOW_ROOT_CACHE
-    global _COMMAND_LINEAGE_GROUPS
-    global _COMMAND_LINEAGE_GROUPS_READY
-    if _COMMAND_RUN_METADATA_CACHE is not None:
+    global _COMMAND_QUERY_SESSION
+    if _COMMAND_QUERY_SESSION is not None:
         yield
         return
-    run_metadata = all_run_metadata()
-    _COMMAND_RUN_METADATA_CACHE = run_metadata
-    _COMMAND_RUNS_BY_WORKFLOW = {}
-    for item in run_metadata:
-        identifier = str(item[1].get("workflow_id") or "")
-        _COMMAND_RUNS_BY_WORKFLOW.setdefault(identifier, []).append(item)
-    _COMMAND_WORKFLOW_ANCESTRY_CACHE = {}
-    _COMMAND_WORKFLOW_ROOT_CACHE = {}
-    _COMMAND_LINEAGE_GROUPS = {}
-    _COMMAND_LINEAGE_GROUPS_READY = False
+    _COMMAND_QUERY_SESSION = QuerySession.from_records(all_run_metadata())
     try:
         yield
     finally:
-        _COMMAND_RUN_METADATA_CACHE = None
-        _COMMAND_RUNS_BY_WORKFLOW = None
-        _COMMAND_WORKFLOW_ANCESTRY_CACHE = None
-        _COMMAND_WORKFLOW_ROOT_CACHE = None
-        _COMMAND_LINEAGE_GROUPS = None
-        _COMMAND_LINEAGE_GROUPS_READY = False
+        _COMMAND_QUERY_SESSION = None
 
 
 def run_command(
@@ -795,6 +685,7 @@ def classify_provider_failure(
             "unauthorized",
             "invalid api key",
             "login required",
+            "not logged in",
         )
     ):
         return "authentication"
@@ -1697,14 +1588,7 @@ def content_fingerprint(repo: Path, paths: Sequence[str]) -> str:
 
 
 def safe_write(path: Path, content: str) -> None:
-    try:
-        path.write_text(content, encoding="utf-8")
-        path.chmod(0o600)
-    except OSError as exc:
-        raise ReviewError(
-            f"Cannot write private review artifact at {path}: {exc}."
-            + private_state_permission_hint(path)
-        ) from exc
+    write_artifact_text(path, content, permission_hint=private_state_permission_hint)
 
 
 def stage_reviewer_inputs(
@@ -2260,231 +2144,19 @@ defect, risk, missing test, or coverage limitation here.
 def reviewer_definitions(
     args: argparse.Namespace, config: dict[str, Any]
 ) -> list[Reviewer]:
-    claude_enabled = bool(config["claude"]["enabled"])
-    codex_enabled = bool(config["codex"]["enabled"])
-    antigravity_enabled = bool(config["antigravity"]["enabled"])
-    kimi_enabled = bool(config["kimi"]["enabled"])
-    if args.with_claude:
-        if not config["claude"].get("allow_run_override", True):
-            raise ReviewError(
-                "Claude is locked off in persistent configuration. Run "
-                "`merani enable claude` before using a one-run override."
-            )
-        claude_enabled = True
-    if args.without_claude:
-        claude_enabled = False
-    if args.with_codex:
-        if not config["codex"].get("allow_run_override", True):
-            raise ReviewError(
-                "Codex is locked off in persistent configuration. Run "
-                "`merani enable codex` before using a one-run override."
-            )
-        codex_enabled = True
-    if args.without_codex:
-        codex_enabled = False
-    if args.with_antigravity:
-        if not config["antigravity"].get("allow_run_override", True):
-            raise ReviewError(
-                "Antigravity is locked off in persistent configuration. "
-                "Run `merani enable antigravity` before using a one-run "
-                "override."
-            )
-        antigravity_enabled = True
-    if args.without_antigravity:
-        antigravity_enabled = False
-    if args.with_kimi:
-        if not config["kimi"].get("allow_run_override", True):
-            raise ReviewError(
-                "Kimi is locked off in persistent configuration. Run "
-                "`merani enable kimi` before using a one-run override."
-            )
-        kimi_enabled = True
-    if args.without_kimi:
-        kimi_enabled = False
-
-    reviewers: list[Reviewer] = []
-    if claude_enabled:
-        model = args.claude_model or str(config["claude"]["model"])
-        effort = (
-            args.claude_effort
-            or str(config["claude"].get("effort", "medium"))
-        )
-        max_budget_usd = (
-            args.claude_max_budget_usd
-            if args.claude_max_budget_usd is not None
-            else float(config["claude"].get("max_budget_usd", 1.25))
-        )
-        if not math.isfinite(max_budget_usd) or max_budget_usd <= 0:
-            raise ReviewError("Claude max budget must be a positive finite number.")
-        reviewers.append(
-            Reviewer(
-                "claude",
-                (
-                    "claude",
-                    "-p",
-                    "--output-format",
-                    "json",
-                    "--json-schema",
-                    json.dumps(CLAUDE_REVIEW_SCHEMA, separators=(",", ":")),
-                    "--model",
-                    model,
-                    "--effort",
-                    effort,
-                    "--max-budget-usd",
-                    str(max_budget_usd),
-                    "--permission-mode",
-                    "plan",
-                    "--tools",
-                    "Read,Grep,Glob",
-                    "--safe-mode",
-                    "--no-session-persistence",
-                ),
-                {},
-                model,
-                version_of("claude"),
-            )
-        )
-    if codex_enabled:
-        model = args.codex_model or str(config["codex"]["model"])
-        command = [
-            "codex",
-            "--ask-for-approval",
-            "never",
-            "exec",
-            "--strict-config",
-            "--config",
-            'shell_environment_policy.inherit="none"',
-            "--config",
-            "shell_environment_policy.experimental_use_profile=false",
-            "--config",
-            "allow_login_shell=false",
-            "--config",
-            "agents.enabled=false",
-            "--config",
-            "tools.web_search=false",
-            "--ephemeral",
-            "--profile",
-            CODEX_REVIEW_PROFILE_NAME,
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--json",
-            "--disable",
-            "apps",
-            "--disable",
-            "browser_use",
-            "--disable",
-            "computer_use",
-            "--disable",
-            "in_app_browser",
-            "--disable",
-            "memories",
-            "--disable",
-            "view_image",
-            "--disable",
-            "workspace_dependencies",
-            "--disable",
-            "shell_tool",
-            "--disable",
-            "unified_exec",
-        ]
-        if model != "default":
-            command.extend(("--model", model))
-        reviewers.append(
-            Reviewer(
-                "codex",
-                tuple(command),
-                {},
-                model,
-                version_of("codex"),
-            )
-        )
-    if antigravity_enabled:
-        model = args.antigravity_model or str(config["antigravity"]["model"])
-        command = [
-            "agy",
-            "--agent",
-            ANTIGRAVITY_AGENT_NAME,
-            "--mode",
-            "plan",
-            "--sandbox",
-            "--output-format",
-            "json",
-        ]
-        if model != "auto":
-            command.extend(("--model", model))
-        reviewers.append(
-            Reviewer(
-                "antigravity",
-                tuple(command),
-                {},
-                model,
-                version_of("agy"),
-            )
-        )
-    if kimi_enabled:
-        model = args.kimi_model or str(config["kimi"]["model"])
-        reviewers.append(
-            Reviewer(
-                "kimi",
-                (
-                    "kimi",
-                    "--output-format",
-                    "text",
-                    "--model",
-                    model,
-                    "--agent-file",
-                    str(KIMI_AGENT_PATH),
-                ),
-                {"KIMI_CODE_EXPERIMENTAL_FLAG": "1"},
-                model,
-                version_of("kimi"),
-            )
-        )
-
-    if not reviewers:
-        raise ReviewError(
-            "No reviewers are enabled. Enable Claude, Codex, Antigravity, or Kimi."
-        )
-    for reviewer in reviewers:
-        if shutil.which(reviewer.command[0]) is None:
-            raise ReviewError(
-                f"{reviewer.name} is enabled but {reviewer.command[0]} is not on PATH. "
-                f"Run `python3 {shlex.quote(str(Path(__file__).resolve()))} "
-                f"disable {reviewer.name}` or install its CLI."
-            )
-        blocked_until = active_provider_cooldown(reviewer.name)
-        if blocked_until:
-            raise ReviewError(
-                f"{reviewer.name} is in quota cooldown until {blocked_until}; "
-                "the runner will not consume another attempt before then."
-            )
-        if reviewer.name in {"codex", "antigravity", "kimi"}:
-            readiness = provider_readiness(reviewer.name, reviewer.model)
-            if not readiness.ready:
-                raise ReviewError(
-                    f"{reviewer.name.title()} is enabled but not ready: "
-                    f"{readiness.detail}."
-                )
-            if (
-                reviewer.name == "codex"
-                and readiness.authentication_mode == "api_billed"
-            ):
-                raise ReviewError(
-                    "The Codex reviewer requires ChatGPT subscription "
-                    "authentication. API-key authentication is rejected so "
-                    "reviewer tools never inherit an API credential."
-                )
-            if (
-                reviewer.name == "antigravity"
-                and reviewer.model != "auto"
-                and reviewer.model not in readiness.models
-            ):
-                available = ", ".join(readiness.models) or "none reported"
-                raise ReviewError(
-                    f"Antigravity model {reviewer.model!r} is unavailable. "
-                    f"Available models: {available}"
-                )
-    return reviewers
+    return build_provider_reviewers(
+        args,
+        config,
+        review_schema=CLAUDE_REVIEW_SCHEMA,
+        codex_profile=CODEX_REVIEW_PROFILE_NAME,
+        antigravity_agent_name=ANTIGRAVITY_AGENT_NAME,
+        kimi_agent_path=KIMI_AGENT_PATH,
+        version_of=version_of,
+        binary_available=lambda command: shutil.which(command) is not None,
+        active_cooldown=active_provider_cooldown,
+        readiness=provider_readiness,
+        launcher_path=Path(__file__).resolve(),
+    )
 
 
 def terminate_process_group(
@@ -2659,77 +2331,15 @@ def communicate_with_codex_network_watch(
 def parse_codex_jsonl(
     stdout: str,
 ) -> tuple[str, dict[str, Any] | None, bool, str | None, dict[str, Any] | None, bool]:
-    """Extract one schema-constrained final review from Codex JSONL events."""
-    events: list[dict[str, Any]] = []
-    malformed = False
-    for line in stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            malformed = True
-            continue
-        if not isinstance(event, dict):
-            malformed = True
-            continue
-        events.append(event)
-
-    final_text: str | None = None
-    usage: dict[str, Any] | None = None
-    provider_error = False
-    provider_error_detail: str | None = None
-    completed_report = False
-    for event in events:
-        event_type = str(event.get("type") or "")
-        if event_type == "turn.started":
-            final_text = None
-            completed_report = False
-        item = event.get("item")
-        if (
-            event_type == "item.completed"
-            and isinstance(item, dict)
-            and item.get("type") == "agent_message"
-            and isinstance(item.get("text"), str)
-        ):
-            final_text = str(item["text"])
-            completed_report = False
-        event_usage = event.get("usage")
-        if event_type == "turn.completed":
-            completed_report = final_text is not None
-        if event_type == "turn.completed" and isinstance(event_usage, dict):
-            usage = {"usage": event_usage}
-        if event_type in {"error", "turn.failed"}:
-            provider_error = True
-            error = event.get("error")
-            provider_error_detail = (
-                json.dumps(error, sort_keys=True)
-                if isinstance(error, (dict, list))
-                else str(error or event.get("message") or event_type)
-            )
-
-    structured: dict[str, Any] | None = None
-    report = final_text or ""
-    if final_text:
-        try:
-            candidate = json.loads(final_text)
-        except json.JSONDecodeError:
-            malformed = True
-        else:
-            if not isinstance(candidate, dict):
-                malformed = True
-            else:
-                structured = candidate
-                try:
-                    report = render_structured_review(candidate)
-                except (KeyError, TypeError, ValueError):
-                    malformed = True
-                    report = ""
-    elif not provider_error:
-        malformed = True
-    if not completed_report and not provider_error:
-        malformed = True
-    return report, usage, provider_error, provider_error_detail, structured, malformed
+    decoded = decode_provider_output("codex", stdout, render_structured_review)
+    return (
+        decoded["report"],
+        decoded["usage"],
+        decoded["provider_error"],
+        decoded["failure_detail"],
+        decoded["structured"],
+        decoded["malformed"],
+    )
 
 
 def reviewer_process_environment(reviewer: Reviewer) -> dict[str, str]:
@@ -3342,100 +2952,40 @@ def invoke_reviewer(
         )
 
     report = stdout
-    if reviewer.name == "codex" and stdout.strip():
-        (
-            report,
-            usage,
-            provider_reported_error,
-            provider_failure_detail,
-            structured,
-            malformed_provider_response,
-        ) = parse_codex_jsonl(stdout)
-        safe_write(run_dir / "codex.raw.jsonl", stdout)
-        if structured is not None:
-            safe_write(
-                run_dir / "codex.structured.json",
-                json.dumps(structured, indent=2, sort_keys=True) + "\n",
-            )
-        empty_success_response = (
-            not provider_reported_error and not report.strip()
+    if stdout.strip():
+        decoded = decode_provider_output(
+            reviewer.name, stdout, render_structured_review
         )
-    elif reviewer.name in {"claude", "antigravity"} and stdout.strip():
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
-            payload = None
-            malformed_provider_response = True
-        if not isinstance(payload, dict):
-            malformed_provider_response = True
-        if isinstance(payload, dict):
-            result_key = "result" if reviewer.name == "claude" else "response"
-            result = payload.get(result_key)
-            if reviewer.name == "claude":
-                structured = payload.get("structured_output")
-                if isinstance(structured, dict):
-                    try:
-                        report = render_structured_review(structured)
-                    except (KeyError, TypeError, ValueError):
-                        malformed_provider_response = True
-                        report = result if isinstance(result, str) else ""
-                    else:
-                        safe_write(
-                            run_dir / "claude.structured.json",
-                            json.dumps(structured, indent=2, sort_keys=True) + "\n",
-                        )
-                elif "structured_output" in payload and not payload.get("is_error"):
-                    malformed_provider_response = True
-                    report = result if isinstance(result, str) else ""
-                elif isinstance(result, str):
-                    report = result
-                usage = {
-                    key: payload[key]
-                    for key in (
-                        "duration_ms",
-                        "duration_api_ms",
-                        "num_turns",
-                        "total_cost_usd",
-                        "usage",
-                        "modelUsage",
-                    )
-                    if key in payload
-                } or None
-                provider_reported_error = bool(payload.get("is_error"))
-                if provider_reported_error and isinstance(result, str):
-                    provider_failure_detail = result
-                empty_success_response = (
-                    not provider_reported_error
-                    and not report.strip()
+        report = decoded["report"]
+        usage = decoded["usage"]
+        provider_reported_error = bool(decoded["provider_error"])
+        provider_failure_detail = decoded["failure_detail"]
+        malformed_provider_response = bool(decoded["malformed"])
+        empty_success_response = bool(decoded["empty_success"])
+        structured = decoded["structured"]
+        raw_payload = decoded["raw_payload"]
+        if reviewer.name == "codex":
+            safe_write(run_dir / "codex.raw.jsonl", stdout)
+            if isinstance(structured, dict):
+                safe_write(
+                    run_dir / "codex.structured.json",
+                    json.dumps(structured, indent=2, sort_keys=True) + "\n",
                 )
-            else:
-                if isinstance(result, str):
-                    report = result
-                usage = {
-                    key: payload[key]
-                    for key in ("duration_seconds", "num_turns", "usage")
-                    if key in payload
-                } or None
-                provider_status_error = (
-                    str(payload.get("status", "SUCCESS")).upper() != "SUCCESS"
-                    or bool(payload.get("error"))
+        elif reviewer.name in {"claude", "antigravity"} and isinstance(
+            raw_payload, dict
+        ):
+            if (
+                reviewer.name == "claude"
+                and isinstance(structured, dict)
+                and not malformed_provider_response
+            ):
+                safe_write(
+                    run_dir / "claude.structured.json",
+                    json.dumps(structured, indent=2, sort_keys=True) + "\n",
                 )
-                empty_success_response = (
-                    not provider_status_error
-                    and isinstance(result, str)
-                    and not result.strip()
-                )
-                provider_reported_error = (
-                    provider_status_error
-                    or not isinstance(result, str)
-                    or not result.strip()
-                )
-                provider_error = payload.get("error")
-                if provider_status_error and isinstance(provider_error, str):
-                    provider_failure_detail = provider_error
             safe_write(
                 run_dir / f"{reviewer.name}.raw.json",
-                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                json.dumps(raw_payload, indent=2, sort_keys=True) + "\n",
             )
     safe_write(report_path, report)
     safe_write(error_path, sanitized_failure_text(stderr))
@@ -4029,46 +3579,21 @@ def workflow_policy(
     max_provider_attempts: int = 6,
     provider_use_policy: str = "explicit",
 ) -> dict[str, Any]:
-    mode = REVIEW_MODES[review_mode]
-    policy = {
-        "review_mode": review_mode,
-        "max_repair_rounds": mode["max_repair_rounds"],
-        "confirmation_required": True,
-        "repair_effort": mode["repair_effort"],
-        "confirmation_effort": mode["confirmation_effort"],
-    }
-    if usage_based:
-        policy["usage_policy"] = {
-            "mode": "provider_allowance",
-            "provider_use": provider_use_policy,
-            "max_attempts_per_provider": max_provider_attempts,
-            "remaining_allowance": "provider_reported_or_unknown",
-            "api_equivalent_usd_is_billing": False,
-        }
-        policy["enforce_lineage_api_equivalent_cap"] = False
-    else:
-        policy["max_budget_usd"] = max_budget_usd
-    return policy
+    return build_workflow_policy(
+        max_budget_usd,
+        review_mode,
+        usage_based=usage_based,
+        max_provider_attempts=max_provider_attempts,
+        provider_use_policy=provider_use_policy,
+    )
 
 
 def review_mode_from_policy(policy: dict[str, Any]) -> str:
-    review_mode = policy.get("review_mode")
-    if review_mode in REVIEW_MODES:
-        return str(review_mode)
-    max_repairs = policy.get("max_repair_rounds")
-    if not isinstance(max_repairs, int) or not 1 <= max_repairs <= MAX_REPAIR_ROUNDS:
-        max_repairs = MAX_REPAIR_ROUNDS
-    for name, mode in REVIEW_MODES.items():
-        if mode["max_repair_rounds"] == max_repairs:
-            return name
-    return "deep"
+    return choose_review_mode(policy)
 
 
 def review_mode_with_origin(policy: dict[str, Any]) -> tuple[str, str]:
-    """Keep inferred legacy depth out of explicit adaptive-mode evidence."""
-    mode = review_mode_from_policy(policy)
-    origin = "explicit" if policy.get("review_mode") in REVIEW_MODES else "inferred_legacy"
-    return mode, origin
+    return choose_review_mode_with_origin(policy)
 
 
 def workflow_path(identifier: str) -> Path:
@@ -4078,10 +3603,10 @@ def workflow_path(identifier: str) -> Path:
 def workflow_ancestry_ids(identifier: str) -> list[str]:
     """Return this workflow and every transitive ancestor, oldest first."""
     if (
-        _COMMAND_WORKFLOW_ANCESTRY_CACHE is not None
-        and identifier in _COMMAND_WORKFLOW_ANCESTRY_CACHE
+        _COMMAND_QUERY_SESSION is not None
+        and identifier in _COMMAND_QUERY_SESSION.workflow_ancestry
     ):
-        return list(_COMMAND_WORKFLOW_ANCESTRY_CACHE[identifier])
+        return list(_COMMAND_QUERY_SESSION.workflow_ancestry[identifier])
     ordered: list[str] = []
     visiting: set[str] = set()
 
@@ -4105,31 +3630,30 @@ def workflow_ancestry_ids(identifier: str) -> list[str]:
         ordered.append(current)
 
     visit(identifier)
-    if _COMMAND_WORKFLOW_ANCESTRY_CACHE is not None:
-        _COMMAND_WORKFLOW_ANCESTRY_CACHE[identifier] = list(ordered)
+    if _COMMAND_QUERY_SESSION is not None:
+        _COMMAND_QUERY_SESSION.workflow_ancestry[identifier] = list(ordered)
     return ordered
 
 
 def workflow_lineage_root(identifier: str) -> str:
     if (
-        _COMMAND_WORKFLOW_ROOT_CACHE is not None
-        and identifier in _COMMAND_WORKFLOW_ROOT_CACHE
+        _COMMAND_QUERY_SESSION is not None
+        and identifier in _COMMAND_QUERY_SESSION.workflow_roots
     ):
-        return _COMMAND_WORKFLOW_ROOT_CACHE[identifier]
+        return _COMMAND_QUERY_SESSION.workflow_roots[identifier]
     ancestry = workflow_ancestry_ids(identifier)
     root = ancestry[0] if ancestry else identifier
-    if _COMMAND_WORKFLOW_ROOT_CACHE is not None:
-        _COMMAND_WORKFLOW_ROOT_CACHE[identifier] = root
+    if _COMMAND_QUERY_SESSION is not None:
+        _COMMAND_QUERY_SESSION.workflow_roots[identifier] = root
     return root
 
 
 def workflow_lineage_ids(identifier: str) -> list[str]:
     """Return every workflow connected to the same task-lineage root."""
-    global _COMMAND_LINEAGE_GROUPS_READY
     root = workflow_lineage_root(identifier)
     identifiers = set(workflow_ancestry_ids(identifier))
-    if _COMMAND_LINEAGE_GROUPS is not None:
-        if not _COMMAND_LINEAGE_GROUPS_READY and WORKFLOWS_DIR.exists():
+    if _COMMAND_QUERY_SESSION is not None:
+        if not _COMMAND_QUERY_SESSION.lineage_groups_ready and WORKFLOWS_DIR.exists():
             for path in WORKFLOWS_DIR.glob("*.json"):
                 if path.name.endswith(".final.json"):
                     continue
@@ -4138,11 +3662,11 @@ def workflow_lineage_ids(identifier: str) -> list[str]:
                     candidate_root = workflow_lineage_root(candidate)
                 except ReviewError:
                     continue
-                _COMMAND_LINEAGE_GROUPS.setdefault(candidate_root, set()).add(
+                _COMMAND_QUERY_SESSION.lineage_groups.setdefault(candidate_root, set()).add(
                     candidate
                 )
-            _COMMAND_LINEAGE_GROUPS_READY = True
-        identifiers.update(_COMMAND_LINEAGE_GROUPS.get(root, set()))
+            _COMMAND_QUERY_SESSION.lineage_groups_ready = True
+        identifiers.update(_COMMAND_QUERY_SESSION.lineage_groups.get(root, set()))
     elif WORKFLOWS_DIR.exists():
         for path in WORKFLOWS_DIR.glob("*.json"):
             if path.name.endswith(".final.json"):
@@ -4164,11 +3688,11 @@ def workflow_lineage_ids(identifier: str) -> list[str]:
 
 def workflow_lineage_runs(identifier: str) -> list[tuple[Path, dict[str, Any]]]:
     identifiers = set(workflow_lineage_ids(identifier))
-    if _COMMAND_RUNS_BY_WORKFLOW is not None:
+    if _COMMAND_QUERY_SESSION is not None:
         return [
             item
             for workflow_identifier in identifiers
-            for item in _COMMAND_RUNS_BY_WORKFLOW.get(workflow_identifier, [])
+            for item in _COMMAND_QUERY_SESSION.runs_by_workflow.get(workflow_identifier, [])
         ]
     return [
         item
@@ -4528,7 +4052,7 @@ def reviewer_resource_metadata(reviewer: Reviewer) -> dict[str, str]:
     authentication_mode = "unknown"
     usage_resource = "provider_allowance"
     if reviewer.name == "claude":
-        authentication_mode, _ = claude_authentication_mode(reviewer.command[0])
+        authentication_mode, _, _ = claude_authentication_mode(reviewer.command[0])
         usage_resource = (
             "included_plan_allowance"
             if authentication_mode == "subscription"
@@ -4664,68 +4188,14 @@ def _adjust_workflow_budget(
     reserved: float,
     minimum_provider_budget_usd: float = MIN_CLAUDE_REVIEW_BUDGET_USD,
 ) -> tuple[list[Reviewer], dict[str, float], float]:
-    remaining = max(0.0, limit - spent - reserved)
-    adjusted: list[Reviewer] = []
-    reserved_for_run = 0.0
-    provider_budget = 0.0
-    safety_reserve = 0.0
-    for reviewer in reviewers:
-        if reviewer.name != "claude":
-            adjusted.append(reviewer)
-            continue
-        minimum_required = max(
-            MIN_CLAUDE_REVIEW_BUDGET_USD, minimum_provider_budget_usd
-        )
-        maximum_safe_provider_budget = remaining / (
-            1 + CLAUDE_BUDGET_SAFETY_RATIO
-        )
-        if maximum_safe_provider_budget < minimum_required:
-            raise ReviewError(
-                f"Legacy workflow {identifier} has only ${remaining:.2f} "
-                "unreserved API-equivalent allowance, which permits at most "
-                f"${maximum_safe_provider_budget:.2f} for Claude after the "
-                f"{CLAUDE_BUDGET_SAFETY_RATIO:.0%} provider-overrun safety "
-                f"reserve. This is below the ${minimum_required:.2f} minimum "
-                "viable provider budget for this review. "
-                f"The workflow cap is ${limit:.2f} "
-                f"(${spent:.2f} reported, ${reserved:.2f} reserved). "
-                "No provider was started. A successor inherits the same cap; "
-                "start a separate workflow with a larger explicitly approved "
-                "budget only when intentionally beginning a new review lineage."
-            )
-        command = list(reviewer.command)
-        budget_index = command.index("--max-budget-usd") + 1
-        requested = float(command[budget_index])
-        provider_budget = round(
-            min(requested, maximum_safe_provider_budget), 6
-        )
-        if provider_budget < minimum_required:
-            raise ReviewError(
-                f"Workflow {identifier} would cap Claude at "
-                f"${provider_budget:.2f}, below the ${minimum_required:.2f} "
-                "minimum viable provider budget for this review. No provider "
-                "was started. Increase the explicitly approved budget in a new "
-                "workflow rather than launching a predictably underfunded run."
-            )
-        safety_reserve = round(
-            provider_budget * CLAUDE_BUDGET_SAFETY_RATIO, 6
-        )
-        reserved_for_run = round(provider_budget + safety_reserve, 6)
-        command[budget_index] = str(provider_budget)
-        adjusted.append(dataclasses.replace(reviewer, command=tuple(command)))
-    return adjusted, {
-        "max_budget_usd": round(limit, 6),
-        "spent_before_run_usd": round(spent, 6),
-        "reserved_before_run_usd": round(reserved, 6),
-        "remaining_before_run_usd": round(remaining, 6),
-        "minimum_provider_budget_usd": round(
-            max(MIN_CLAUDE_REVIEW_BUDGET_USD, minimum_provider_budget_usd), 6
-        ),
-        "provider_budget_for_run_usd": round(provider_budget, 6),
-        "provider_overrun_safety_ratio": CLAUDE_BUDGET_SAFETY_RATIO,
-        "provider_overrun_safety_reserve_usd": round(safety_reserve, 6),
-        "reserved_for_run_usd": reserved_for_run,
-    }, reserved_for_run
+    return adjust_legacy_workflow_budget(
+        reviewers,
+        identifier=identifier,
+        limit=limit,
+        spent=spent,
+        reserved=reserved,
+        minimum_provider_budget_usd=minimum_provider_budget_usd,
+    )
 
 
 def apply_workflow_budget(
@@ -5260,8 +4730,8 @@ def workflow_supersede_command(args: argparse.Namespace) -> int:
 
 
 def all_run_metadata() -> list[tuple[Path, dict[str, Any]]]:
-    if _COMMAND_RUN_METADATA_CACHE is not None:
-        return _COMMAND_RUN_METADATA_CACHE
+    if _COMMAND_QUERY_SESSION is not None:
+        return _COMMAND_QUERY_SESSION.run_metadata
     if not RUNS_DIR.exists():
         return []
     found: list[tuple[Path, dict[str, Any]]] = []
@@ -5274,8 +4744,8 @@ def all_run_metadata() -> list[tuple[Path, dict[str, Any]]]:
 
 
 def workflow_runs(identifier: str) -> list[tuple[Path, dict[str, Any]]]:
-    if _COMMAND_RUNS_BY_WORKFLOW is not None:
-        return list(_COMMAND_RUNS_BY_WORKFLOW.get(identifier, []))
+    if _COMMAND_QUERY_SESSION is not None:
+        return list(_COMMAND_QUERY_SESSION.runs_by_workflow.get(identifier, []))
     return [
         item
         for item in all_run_metadata()
@@ -6334,8 +5804,7 @@ def minimum_viable_reviewer_budget(
 
 
 def required_successful_provider_rounds(phase: str) -> int:
-    """Return the minimum provider calls still needed from this launch point."""
-    return 2 if phase == "repair" else 1
+    return required_provider_rounds(phase)
 
 
 def review_admission_assessment(
@@ -6345,86 +5814,12 @@ def review_admission_assessment(
     workflow_budget: dict[str, Any] | None,
     budget_estimates: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Assess whether a provider run can still reach a compliant final gate."""
-    assessment: dict[str, Any] = {
-        "phase": phase,
-        "blocked": False,
-        "providers": [],
-    }
-    if (
-        not isinstance(workflow_budget, dict)
-        or workflow_budget.get("mode") != "provider_allowance"
-    ):
-        return assessment
-
-    maximum = workflow_budget.get("max_attempts_per_provider")
-    attempts_before = workflow_budget.get("attempts_before_run")
-    reserved_before = workflow_budget.get("reserved_before_run")
-    if not isinstance(maximum, int):
-        return assessment
-    attempts_before = attempts_before if isinstance(attempts_before, dict) else {}
-    reserved_before = reserved_before if isinstance(reserved_before, dict) else {}
-    required = required_successful_provider_rounds(phase)
-
-    for reviewer in reviewers:
-        used = int(attempts_before.get(reviewer.name) or 0)
-        reserved = int(reserved_before.get(reviewer.name) or 0)
-        remaining = max(0, maximum - used - reserved)
-        recovery_headroom = max(0, remaining - required)
-        estimate = budget_estimates.get(reviewer.name)
-        recommendation = (
-            estimate.get("recommended_budget_usd")
-            if isinstance(estimate, dict)
-            else None
-        )
-        configured = (
-            estimate.get("configured_budget_usd")
-            if isinstance(estimate, dict)
-            else None
-        )
-        sample_count = int(estimate.get("sample_count") or 0) if estimate else 0
-        confidence = str(estimate.get("confidence") or "low") if estimate else "low"
-        recommendation_is_actionable = (
-            reviewer.name == "claude"
-            and isinstance(recommendation, (int, float))
-            and not isinstance(recommendation, bool)
-            and isinstance(configured, (int, float))
-            and not isinstance(configured, bool)
-            and sample_count >= MIN_BUDGET_ESTIMATE_SAMPLES
-            and confidence in {"medium", "high"}
-        )
-        below_recommendation = bool(
-            recommendation_is_actionable
-            and float(configured) < float(recommendation)
-        )
-        insufficient_attempts = remaining < required
-        no_recovery_underfunded = remaining == required and below_recommendation
-        blocked = insufficient_attempts or no_recovery_underfunded
-        provider_assessment = {
-            "provider": reviewer.name,
-            "attempts_before": used,
-            "reserved_before": reserved,
-            "max_attempts": maximum,
-            "attempts_remaining_before_run": remaining,
-            "required_successful_rounds": required,
-            "recovery_attempts_after_required_rounds": recovery_headroom,
-            "configured_budget_usd": configured,
-            "recommended_budget_usd": recommendation,
-            "budget_evidence_samples": sample_count,
-            "budget_evidence_confidence": confidence,
-            "configured_below_recommendation": below_recommendation,
-            "blocked": blocked,
-            "block_reason": (
-                "insufficient_attempts"
-                if insufficient_attempts
-                else "underfunded_without_recovery_headroom"
-                if no_recovery_underfunded
-                else None
-            ),
-        }
-        assessment["providers"].append(provider_assessment)
-        assessment["blocked"] = bool(assessment["blocked"] or blocked)
-    return assessment
+    return assess_review_admission(
+        reviewers,
+        phase=phase,
+        workflow_budget=workflow_budget,
+        budget_estimates=budget_estimates,
+    )
 
 
 def enforce_review_admission(
@@ -6432,64 +5827,7 @@ def enforce_review_admission(
     *,
     workflow_id: str,
 ) -> None:
-    blocked = [
-        item
-        for item in assessment.get("providers", [])
-        if isinstance(item, dict) and item.get("blocked")
-    ]
-    if not blocked:
-        return
-
-    details: list[str] = []
-    required_limit = 0
-    for item in blocked:
-        provider = str(item["provider"])
-        used = int(item["attempts_before"])
-        reserved = int(item["reserved_before"])
-        required = int(item["required_successful_rounds"])
-        remaining = int(item["attempts_remaining_before_run"])
-        required_limit = max(required_limit, used + reserved + required + 1)
-        if item["block_reason"] == "insufficient_attempts":
-            details.append(
-                f"{provider} has {remaining} attempt(s) remaining but {required} "
-                "successful round(s) are still required"
-            )
-            continue
-        details.append(
-            f"{provider} has no recovery attempt beyond the {required} required "
-            f"round(s), while its configured API-equivalent stop "
-            f"${float(item['configured_budget_usd']):.2f} is below the "
-            f"${float(item['recommended_budget_usd']):.2f} historical "
-            f"recommendation ({item['budget_evidence_samples']} samples, "
-            f"{item['budget_evidence_confidence']} confidence)"
-        )
-
-    budget_override = next(
-        (
-            float(item["recommended_budget_usd"])
-            for item in blocked
-            if item.get("block_reason") == "underfunded_without_recovery_headroom"
-        ),
-        None,
-    )
-    alternatives = []
-    if budget_override is not None:
-        alternatives.append(
-            f"rerun with --claude-max-budget-usd {budget_override:.2f}"
-        )
-    alternatives.append(
-        "increase audited recovery headroom with `merani workflow "
-        f"raise-provider-attempt-limit {workflow_id} --to {required_limit} "
-        "--reason \"reserve review recovery headroom\"`"
-    )
-    raise ReviewError(
-        f"Workflow {workflow_id} review admission blocked before invoking a "
-        "provider: "
-        + "; ".join(details)
-        + ". No provider was started; "
-        + " or ".join(alternatives)
-        + "."
-    )
+    enforce_review_admission_policy(assessment, workflow_id=workflow_id)
 
 
 def reviewer_command_value(reviewer: Reviewer, flag: str) -> str | None:
@@ -7249,467 +6587,21 @@ def repository_has_stale_passing_final(repository: dict[str, Any]) -> bool:
 def workflow_continue_plan(
     identifier: str, *, probe_usage: bool = False
 ) -> dict[str, Any]:
-    status, ready = workflow_status(identifier)
-    state = str(status.get("state") or "active")
-    usage = provider_usage_snapshot(identifier, probe_readiness=probe_usage)
-    plan: dict[str, Any] = {
-        "workflow_id": identifier,
-        "state": state,
-        "ready": ready,
-        "deployment_ready": bool(status.get("deployment_ready")),
-        "provider_usage": usage,
-        "actions": [],
-        "checked_at": utc_now(),
-    }
-    repositories = [
-        item
-        for item in status.get("repositories", [])
-        if isinstance(item, dict)
-    ]
-    stale_passing_finals = [
-        item for item in repositories if repository_has_stale_passing_final(item)
-    ]
-    has_other_blocked_final = any(
-        item.get("state") == "blocked"
-        and not repository_has_stale_passing_final(item)
-        for item in repositories
+    return plan_workflow_continuation(
+        identifier,
+        probe_usage=probe_usage,
+        read_json=read_json,
+        workflow_status=workflow_status,
+        provider_usage_snapshot=provider_usage_snapshot,
+        latest_workflow_attempts=latest_workflow_attempts,
+        current_run_source_changed=_current_run_source_changed,
+        repository_has_stale_passing_final=repository_has_stale_passing_final,
+        run_triage_issues=run_triage_issues,
+        workflow_runs=workflow_runs,
+        workflow_max_repair_rounds=workflow_max_repair_rounds,
+        triage_items=triage_items,
+        utc_now=utc_now,
     )
-    if state == "completed_stale" or (
-        state == "blocked"
-        and stale_passing_finals
-        and not has_other_blocked_final
-    ):
-        plan["next"] = "NEEDS_SUCCESSOR"
-        plan["actions"].append(
-            {
-                "type": "successor",
-                "automatable": False,
-                "reason": (
-                    "The authoritative final is no longer fresh. Preserve the "
-                    "workflow's finalized evidence and create a linked successor "
-                    "for fresh repository gates."
-                ),
-                "command": shlex.join(
-                    [
-                        "merani",
-                        "workflow",
-                        "supersede",
-                        identifier,
-                        "--reason",
-                        "authoritative final became stale",
-                    ]
-                ),
-            }
-        )
-        return plan
-    if state in {"completed", "completed_untrusted"}:
-        plan["next"] = "COMPLETE" if state == "completed" else "BLOCKED"
-        if state == "completed" and not status.get("deployment_ready"):
-            plan["post_commit_actions"] = [
-                {
-                    "repository": (
-                        item.get("repository", {}).get("name")
-                        if isinstance(item.get("repository"), dict)
-                        else "unknown"
-                    ),
-                    "type": "attest_commit",
-                    "command": (
-                        "merani attest-commit --run "
-                        f"{shlex.quote(str(item.get('run_dir')))} --commit HEAD"
-                    ),
-                    "reason": (
-                        "The source gate passes, but no equivalent commit is bound "
-                        "to this final yet."
-                    ),
-                }
-                for item in status.get("repositories", [])
-                if isinstance(item, dict)
-                and item.get("phase") != "supplemental"
-                and not item.get("deployment_ready")
-            ]
-        return plan
-    if state == "superseded":
-        plan["next"] = "SUPERSEDED"
-        return plan
-    if status.get("active_runs"):
-        plan["next"] = "RUNNING"
-        return plan
-    latest_runs = latest_workflow_attempts(identifier)
-    stale_unfinalized_gates = [
-        (run_dir, metadata)
-        for run_dir, metadata in latest_runs
-        if metadata.get("status") == "completed"
-        and metadata.get("phase") in {"confirmation", "supplemental"}
-        and not (run_dir / "final.json").exists()
-        and not (run_dir / "supplemental.json").exists()
-        and not run_triage_issues(run_dir, metadata)
-        and _current_run_source_changed(run_dir, metadata)
-    ]
-    if stale_unfinalized_gates:
-        plan["next"] = "NEEDS_SUCCESSOR"
-        plan["actions"].append(
-            {
-                "type": "successor",
-                "automatable": False,
-                "reason": (
-                    "The completed confirmation or supplemental snapshot changed "
-                    "before Codex finalization. Preserve that evidence and create "
-                    "a linked successor for a fresh review and confirmation."
-                ),
-                "repositories": [
-                    (
-                        metadata.get("repository", {}).get("name")
-                        if isinstance(metadata.get("repository"), dict)
-                        else str(run_dir)
-                    )
-                    for run_dir, metadata in stale_unfinalized_gates
-                ],
-                "command": shlex.join(
-                    [
-                        "merani",
-                        "workflow",
-                        "supersede",
-                        identifier,
-                        "--reason",
-                        "completed review source changed before finalization",
-                    ]
-                ),
-            }
-        )
-        return plan
-    missing_repositories = [
-        item
-        for item in status.get("repositories", [])
-        if isinstance(item, dict) and item.get("state") == "not-reviewed"
-    ]
-    for item in missing_repositories:
-        repository = item.get("repository")
-        repository = repository if isinstance(repository, dict) else {}
-        label = repository.get("name") or repository.get("root") or "unknown"
-        root = repository.get("root")
-        plan["actions"].append(
-            {
-                "repository": label,
-                "type": "review",
-                "phase": "repair",
-                "automatable": False,
-                "reason": (
-                    "This repository was required by the superseded lineage but "
-                    "has no review in the successor workflow."
-                ),
-                "command": shlex.join(
-                    [
-                        "merani",
-                        "run",
-                        "--repo",
-                        str(root or "<repository>"),
-                        "--workflow-id",
-                        identifier,
-                        "--phase",
-                        "repair",
-                        "--reuse-contract",
-                        "--reuse-lineage-sensitive-approvals",
-                    ]
-                ),
-            }
-        )
-    if not latest_runs:
-        if missing_repositories:
-            plan["next"] = "NEEDS_REVIEW"
-            return plan
-        plan["next"] = "NEEDS_INITIAL_REVIEW"
-        plan["actions"].append(
-            {
-                "type": "initial_review",
-                "automatable": False,
-                "reason": (
-                    "The workflow has no repository contract yet. Start the "
-                    "first repair with repo, scope, paths, risks, and task."
-                ),
-                "command": (
-                    f"merani run --workflow-id {shlex.quote(identifier)} "
-                    "--phase repair --uncommitted --task \"<intent>\""
-                ),
-            }
-        )
-        return plan
-
-    priorities = {
-        "BLOCKED": 8,
-        "WAIT_FOR_PROVIDER": 7,
-        "NEEDS_RECOVERY": 6,
-        "NEEDS_TRIAGE": 5,
-        "NEEDS_ASSURANCE": 5,
-        "NEEDS_CODEX_FINAL": 4,
-        "NEEDS_REVIEW": 3,
-        "READY_TO_GATE": 2,
-    }
-    next_state = "READY_TO_GATE"
-    if missing_repositories:
-        next_state = "NEEDS_REVIEW"
-    for run_dir, metadata in latest_runs:
-        repository = metadata.get("repository")
-        repository = repository if isinstance(repository, dict) else {}
-        label = repository.get("name") or repository.get("root") or "unknown"
-        run_status = str(metadata.get("status") or "unknown")
-        action: dict[str, Any] = {
-            "repository": label,
-            "run_dir": str(run_dir),
-            "automatable": False,
-        }
-        candidate = "READY_TO_GATE"
-        failure = metadata.get("failure")
-        reviewer_failure = (
-            isinstance(failure, dict)
-            and failure.get("type") == "reviewer_failure"
-        )
-        if run_status == "partial" or (
-            run_status == "failed" and reviewer_failure
-        ):
-            failed_names = (
-                failure.get("reviewers", [])
-                if isinstance(failure, dict)
-                else []
-            )
-            providers = usage.get("providers")
-            providers = providers if isinstance(providers, dict) else {}
-            unavailable = [
-                str(name)
-                for name in failed_names
-                if not isinstance(providers.get(str(name)), dict)
-                or not providers[str(name)].get("ready")
-                or providers[str(name)].get("attempts_remaining") == 0
-            ]
-            if unavailable:
-                candidate = "WAIT_FOR_PROVIDER"
-                action.update(
-                    {
-                        "type": "wait_for_provider",
-                        "providers": unavailable,
-                        "reason": "A failed reviewer is still quota-blocked or unavailable.",
-                    }
-                )
-            else:
-                candidate = "NEEDS_REVIEW"
-                action.update(
-                    {
-                        "type": "resume",
-                        "automatable": True,
-                        "command": f"merani resume --run {shlex.quote(str(run_dir))}",
-                    }
-                )
-        elif run_status in {"failed", "preflight_blocked"}:
-            candidate = "NEEDS_RECOVERY"
-            action.update(
-                {
-                    "type": "manual_recovery",
-                    "reason": metadata.get("terminal_error") or metadata.get("failure"),
-                }
-            )
-        else:
-            issues = run_triage_issues(run_dir, metadata)
-            if issues:
-                candidate = "NEEDS_TRIAGE"
-                action.update(
-                    {
-                        "type": "triage",
-                        "reason": issues,
-                        "command": (
-                            f"merani decide --run {shlex.quote(str(run_dir))} ..."
-                        ),
-                    }
-                )
-            else:
-                phase = str(metadata.get("phase") or "repair")
-                if phase == "repair":
-                    triage_path = run_dir / "triage.json"
-                    triage = read_json(triage_path) if triage_path.exists() else {}
-                    changed_after_fix = any(
-                        item.get("decision") in {"fixed", "covered"}
-                        for item in triage_items(triage)
-                    ) and _current_run_source_changed(run_dir, metadata)
-                    completed_repairs = sum(
-                        1
-                        for _, item in workflow_runs(identifier)
-                        if isinstance(item.get("repository"), dict)
-                        and str(item["repository"].get("id"))
-                        == str(repository.get("id"))
-                        and item.get("status") == "completed"
-                        and item.get("phase", "repair") == "repair"
-                    )
-                    phase = (
-                        "repair"
-                        if changed_after_fix
-                        and completed_repairs < workflow_max_repair_rounds(identifier)
-                        else "confirmation"
-                    )
-                    candidate = "NEEDS_REVIEW"
-                    action.update(
-                        {
-                            "type": "review",
-                            "phase": phase,
-                            "automatable": not changed_after_fix,
-                            "local_gate_required": changed_after_fix,
-                            "command": shlex.join(
-                                [
-                                    "merani",
-                                    "run",
-                                    "--repo",
-                                    str(repository.get("root")),
-                                    "--workflow-id",
-                                    identifier,
-                                    "--phase",
-                                    phase,
-                                    "--reuse-contract",
-                                    "--reuse-lineage-sensitive-approvals",
-                                    *(
-                                        [
-                                            "--local-verification",
-                                            "<formatter, lint/static checks, and full relevant tests passed>",
-                                        ]
-                                        if changed_after_fix
-                                        else []
-                                    ),
-                                ]
-                            ),
-                        }
-                    )
-                    if phase == "confirmation":
-                        providers = usage.get("providers")
-                        providers = providers if isinstance(providers, dict) else {}
-                        low_headroom = [
-                            provider
-                            for provider, value in providers.items()
-                            if isinstance(value, dict)
-                            and value.get("enabled")
-                            and value.get("attempts_remaining") is not None
-                            and int(value["attempts_remaining"]) < 3
-                        ]
-                        if low_headroom:
-                            recommended_to = max(
-                                int(providers[name].get("attempts") or 0) + 3
-                                for name in low_headroom
-                            )
-                            action["attempt_headroom_warning"] = {
-                                "providers": low_headroom,
-                                "reason": (
-                                    "Confirmation has less than one attempt plus "
-                                    "two recovery attempts available."
-                                ),
-                                "raise_command": (
-                                    "merani workflow raise-provider-attempt-limit "
-                                    f"{shlex.quote(identifier)} --to {recommended_to} "
-                                    '--reason "reserve confirmation recovery headroom"'
-                                ),
-                            }
-                else:
-                    final_path = (
-                        run_dir / "supplemental.json"
-                        if phase == "supplemental"
-                        else run_dir / "final.json"
-                    )
-                    if not final_path.exists():
-                        contract = metadata.get("assurance_contract")
-                        claims = (
-                            validate_assurance_contract(contract)
-                            if isinstance(contract, dict)
-                            else []
-                        )
-                        assurance_path = run_dir / "assurance.json"
-                        assurance_evaluation = (
-                            evaluate_assurance(
-                                read_json(assurance_path),
-                                contract=contract,
-                                source_fingerprint=str(
-                                    metadata.get("source_fingerprint") or ""
-                                ),
-                            )
-                            if claims and assurance_path.exists()
-                            else None
-                        )
-                        if claims and (
-                            not assurance_evaluation
-                            or not assurance_evaluation.get("complete")
-                        ):
-                            candidate = "NEEDS_ASSURANCE"
-                            action.update(
-                                {
-                                    "type": "assurance",
-                                    "claim_ids": [
-                                        str(claim["id"]) for claim in claims
-                                    ],
-                                    "reason": (
-                                        assurance_evaluation.get("issues", [])
-                                        if assurance_evaluation
-                                        else ["assurance.json is missing"]
-                                    ),
-                                    "command": (
-                                        "merani assure --run "
-                                        f"{shlex.quote(str(run_dir))} --claim "
-                                        "<claim-id> --status verified "
-                                        "--evidence-kind <kind> --evidence "
-                                        '"<concrete evidence>"'
-                                    ),
-                                }
-                            )
-                        else:
-                            candidate = "NEEDS_CODEX_FINAL"
-                            action.update(
-                                {
-                                    "type": "codex_final",
-                                    "command": (
-                                        f"merani gate {shlex.quote(identifier)} "
-                                        "--codex-verdict <verdict> --codex-review "
-                                        '"<evidence-backed final review>"'
-                                    ),
-                                }
-                            )
-                    else:
-                        final = read_json(final_path)
-                        trusted, trust_issues = final_contract_trust(final, metadata)
-                        final_status = str(final.get("status") or "")
-                        if (
-                            not trusted
-                            or final_status in {"BLOCK", "SUPPLEMENTAL_BLOCK"}
-                        ):
-                            candidate = "BLOCKED"
-                            action.update(
-                                {
-                                    "type": "blocked_final",
-                                    "reason": trust_issues or final_status,
-                                }
-                            )
-                        else:
-                            action.update(
-                                {"type": "verify_and_close", "automatable": True}
-                            )
-        if candidate == "NEEDS_REVIEW" and probe_usage:
-            providers = usage.get("providers")
-            providers = providers if isinstance(providers, dict) else {}
-            available = [
-                provider
-                for provider, value in providers.items()
-                if isinstance(value, dict)
-                and value.get("enabled")
-                and value.get("ready")
-                and value.get("attempts_remaining") != 0
-            ]
-            if not available:
-                candidate = "WAIT_FOR_PROVIDER"
-                action = {
-                    **action,
-                    "type": "wait_for_provider",
-                    "automatable": False,
-                    "reason": (
-                        "No enabled reviewer currently has confirmed readiness "
-                        "and local attempt allowance."
-                    ),
-                }
-        plan["actions"].append(action)
-        if priorities.get(candidate, 0) > priorities.get(next_state, 0):
-            next_state = candidate
-    plan["next"] = next_state
-    return plan
 
 
 def render_continue_plan_compact(plan: dict[str, Any]) -> str:
@@ -8191,12 +7083,11 @@ def kimi_provider_readiness(command: str, model: str | None) -> ProviderReadines
     )
 
 
-def claude_authentication_mode(command: str = "claude") -> tuple[str, str]:
-    """Return a redacted best-effort billing mode, never credential material."""
+def claude_authentication_mode(command: str = "claude") -> tuple[str, str, bool]:
+    """Return redacted billing mode, detail, and launch permission."""
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return (
-            "api_billed",
-            "ANTHROPIC_API_KEY overrides Claude subscription authentication",
+        return interpret_auth_status(
+            api_key_present=True, returncode=None, stdout=None
         )
     try:
         completed = subprocess.run(
@@ -8207,34 +7098,14 @@ def claude_authentication_mode(command: str = "claude") -> tuple[str, str]:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return "unknown", "authentication mode could not be inspected"
-    if completed.returncode != 0:
-        return "unknown", "authentication status is unavailable"
-    raw = completed.stdout.strip()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        payload = None
-    searchable = json.dumps(payload, sort_keys=True).lower() if payload else raw.lower()
-    if any(
-        marker in searchable
-        for marker in ("api_key", "apikey", "console", "anthropic console")
-    ):
-        return "api_billed", "Claude Console or API-key authentication"
-    if any(
-        marker in searchable
-        for marker in (
-            "subscription",
-            "claude.ai",
-            "oauth",
-            '"pro"',
-            '"max"',
-            '"team"',
-            '"enterprise"',
+        return interpret_auth_status(
+            api_key_present=False, returncode=None, stdout=None
         )
-    ):
-        return "subscription", "Claude subscription authentication"
-    return "unknown", "authenticated; billing mode was not reported"
+    return interpret_auth_status(
+        api_key_present=False,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+    )
 
 
 def codex_authentication_mode(
@@ -8292,11 +7163,11 @@ def provider_readiness(
             usage_resource="provider_allowance",
         )
     if provider == "claude":
-        authentication_mode, authentication_detail = claude_authentication_mode(
+        authentication_mode, authentication_detail, ready = claude_authentication_mode(
             command
         )
         return ProviderReadiness(
-            True,
+            ready,
             f"CLI available; {authentication_detail}" + suffix,
             authentication_mode=authentication_mode,
             usage_resource=(
@@ -9228,43 +8099,11 @@ def final_gate_status(
     findings: Sequence[dict[str, Any]],
     test_gaps: Sequence[dict[str, Any]],
 ) -> str:
-    unresolved_high = [
-        item
-        for item in findings
-        if item.get("severity") in {"blocker", "high"}
-        and item.get("decision") in {"accepted", "uncertain"}
-    ]
-    remaining = [
-        item
-        for item in findings
-        if item.get("decision") in {"accepted", "deferred", "uncertain"}
-    ]
-    accepted_test_gaps = [
-        item for item in test_gaps if item.get("decision") == "accepted"
-    ]
-    deferred_test_gaps = [
-        item for item in test_gaps if item.get("decision") == "deferred"
-    ]
-    unresolved_high_test_gaps = [
-        item
-        for item in test_gaps
-        if item.get("severity") in {"blocker", "high"}
-        and item.get("decision") not in {"covered", "rejected"}
-    ]
-    if unresolved_high or unresolved_high_test_gaps or accepted_test_gaps:
-        return "BLOCK"
-    if remaining or deferred_test_gaps:
-        return "PASS_WITH_FINDINGS"
-    return "PASS_CLEAN"
+    return evaluate_final_gate_status(findings, test_gaps)
 
 
 def conservative_gate_status(*statuses: str) -> str:
-    invalid = [status for status in statuses if status not in GATE_STATUS_ORDER]
-    if invalid:
-        raise ReviewError(
-            "Invalid final-gate status: " + ", ".join(sorted(set(invalid)))
-        )
-    return max(statuses, key=GATE_STATUS_ORDER.__getitem__)
+    return choose_conservative_gate_status(*statuses)
 
 
 def repository_key(metadata: dict[str, Any]) -> str | None:
@@ -9414,62 +8253,7 @@ def final_assurance_is_fresh(
 def final_contract_trust(
     final: dict[str, Any], metadata: dict[str, Any] | None = None
 ) -> tuple[bool, list[str]]:
-    """Return whether a final carries the structured Codex gate contract."""
-    issues: list[str] = []
-    schema_version = final.get("schema_version")
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version < 8
-    ):
-        issues.append("schema_version must be 8 or newer")
-    if final.get("codex_verdict") not in GATE_STATUSES:
-        issues.append("codex_verdict is missing or invalid")
-    if final.get("triage_status") not in GATE_STATUSES:
-        issues.append("triage_status is missing or invalid")
-    triage_sha256s = final.get("triage_sha256s")
-    if not isinstance(triage_sha256s, dict) or not triage_sha256s or any(
-        not isinstance(key, str)
-        or not key
-        or not isinstance(value, str)
-        or not re.fullmatch(r"[a-f0-9]{64}", value)
-        for key, value in (
-            triage_sha256s.items() if isinstance(triage_sha256s, dict) else []
-        )
-    ):
-        issues.append("triage_sha256s is missing or invalid")
-    if isinstance(schema_version, int) and schema_version >= 12:
-        assurance = final.get("assurance")
-        if not isinstance(assurance, dict) or assurance.get("classification") not in {
-            "claim_aware",
-            "no_explicit_claims",
-            "legacy_unassured",
-        }:
-            issues.append("assurance classification is missing or invalid")
-        elif assurance.get("status") not in {
-            "PASS_CLEAN",
-            "PASS_WITH_FINDINGS",
-            "NOT_EVALUATED",
-        }:
-            issues.append("assurance status is missing or invalid")
-    validation = final.get("validation")
-    if not isinstance(validation, dict):
-        issues.append("structured validation is missing; refinalize with --check-result")
-    else:
-        try:
-            planned = validation.get("required_checks")
-            expected_validation = evaluate_checks(validation.get("checks"), planned)
-            if metadata is not None and planned != metadata.get("required_checks"):
-                issues.append("required checks do not match the pinned review contract")
-            if validation != expected_validation:
-                issues.append("structured validation summary does not match check results")
-            if expected_validation["status"] == "BLOCK" and str(final.get("status")) not in {
-                "BLOCK", "SUPPLEMENTAL_BLOCK"
-            }:
-                issues.append("failed, unrun or missing required checks cannot carry a passing final")
-        except ValidationError as exc:
-            issues.append(str(exc))
-    return not issues, issues
+    return evaluate_final_contract_trust(final, metadata)
 
 
 def effective_finalization_items(
@@ -11977,682 +10761,7 @@ def run_review_command(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="merani",
-        description=(
-            "Merani: a second code review for Codex, with a record of what was checked."
-        ),
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    subparsers.add_parser("status", help="Show reviewer configuration and CLI status")
-    doctor = subparsers.add_parser(
-        "doctor",
-        help="Validate plugin/cache/provider readiness; optionally run live probes",
-    )
-    doctor.add_argument(
-        "--live",
-        action="store_true",
-        help="Run a tiny capped live probe against each enabled provider",
-    )
-    subparsers.add_parser(
-        "install-antigravity-agent",
-        help="Install or refresh Antigravity's hard read-only reviewer agent",
-    )
-
-    for action in ("enable", "disable"):
-        toggle = subparsers.add_parser(action, help=f"{action.title()} a reviewer")
-        toggle.add_argument("provider", choices=PROVIDER_CHOICES)
-        if action == "disable":
-            toggle.add_argument(
-                "--lock",
-                action="store_true",
-                help="Also reject explicit one-run enable overrides",
-            )
-        else:
-            toggle.set_defaults(lock=False)
-        toggle.set_defaults(action=action)
-
-    set_model = subparsers.add_parser(
-        "set-model", help="Set a reviewer's default model"
-    )
-    set_model.add_argument("provider", choices=PROVIDER_CHOICES)
-    set_model.add_argument("model")
-    set_effort = subparsers.add_parser(
-        "set-effort", help="Set Claude's default reasoning effort"
-    )
-    set_effort.add_argument("effort", choices=sorted(CLAUDE_EFFORTS))
-    set_budget = subparsers.add_parser(
-        "set-budget",
-        help=(
-            "Deprecated alias: set Claude's per-review API-equivalent "
-            "emergency stop"
-        ),
-    )
-    set_budget.add_argument("usd", type=float)
-    set_usage_limit = subparsers.add_parser(
-        "set-claude-usage-limit",
-        help=(
-            "Set Claude's per-review API-equivalent emergency stop; this does "
-            "not imply subscription billing"
-        ),
-    )
-    set_usage_limit.add_argument("usd", type=float)
-    set_workflow_budget = subparsers.add_parser(
-        "set-workflow-budget",
-        help="Deprecated: set the legacy cumulative API-equivalent cap",
-    )
-    set_workflow_budget.add_argument("usd", type=float)
-    set_provider_attempt_limit = subparsers.add_parser(
-        "set-provider-attempt-limit",
-        help="Set the default per-provider attempt ceiling for a workflow lineage",
-    )
-    set_provider_attempt_limit.add_argument("attempts", type=int)
-    set_provider_use_policy = subparsers.add_parser(
-        "set-provider-use-policy",
-        help="Choose whether continuation requires explicit provider execution",
-    )
-    set_provider_use_policy.add_argument(
-        "policy", choices=sorted(PROVIDER_USE_POLICIES)
-    )
-    analytics = subparsers.add_parser(
-        "analytics",
-        help="Summarize review outcomes, provider usage, failures, and closure",
-    )
-    analytics.add_argument(
-        "--since-days", type=int, default=DEFAULT_ANALYTICS_DAYS
-    )
-    analytics.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-        help="Output format; compact is lossless-by-reference and JSON remains default",
-    )
-    budget_estimate = subparsers.add_parser(
-        "budget-estimate",
-        help="Estimate a non-binding Claude budget from comparable local history",
-    )
-    budget_estimate.add_argument("--repo", default=".")
-    budget_scope = budget_estimate.add_mutually_exclusive_group()
-    budget_scope.add_argument("--uncommitted", action="store_true")
-    budget_scope.add_argument("--base")
-    budget_scope.add_argument("--commit")
-    budget_estimate.add_argument("--path", action="append", default=[])
-    budget_estimate.add_argument(
-        "--review-mode", choices=sorted(REVIEW_MODES), default=DEFAULT_REVIEW_MODE
-    )
-    budget_estimate.add_argument(
-        "--claude-effort", choices=sorted(CLAUDE_EFFORTS)
-    )
-    budget_estimate.add_argument("--claude-model")
-    budget_estimate.add_argument("--claude-max-budget-usd", type=float)
-    budget_estimate.add_argument(
-        "--since-days", type=int, default=DEFAULT_BUDGET_EVIDENCE_DAYS
-    )
-    recommend = subparsers.add_parser(
-        "recommend",
-        help="Conservatively recommend fast, balanced, or deep without running providers",
-    )
-    recommend.add_argument("--repo", default=".")
-    recommend_scope = recommend.add_mutually_exclusive_group()
-    recommend_scope.add_argument("--uncommitted", action="store_true")
-    recommend_scope.add_argument("--base")
-    recommend_scope.add_argument("--commit")
-    recommend.add_argument("--path", action="append", default=[])
-    recommend.add_argument(
-        "--risk", action="append", default=[], choices=sorted(VALID_RISKS)
-    )
-    memory = subparsers.add_parser(
-        "memory",
-        help="Inspect or rebuild Codex-only evidence memory; never shown to reviewers",
-    )
-    memory_subparsers = memory.add_subparsers(
-        dest="memory_command", required=True
-    )
-    memory_subparsers.add_parser(
-        "status", help="Show private evidence-index status"
-    )
-    memory_subparsers.add_parser(
-        "rebuild", help="Rebuild the derived index from authoritative JSON artifacts"
-    )
-    memory_subparsers.add_parser(
-        "compact", help="Compact only the rebuildable index; keep all JSON artifacts"
-    )
-    memory_search = memory_subparsers.add_parser(
-        "search", help="Search prior triaged evidence for Codex verification"
-    )
-    memory_search.add_argument("query")
-    memory_search.add_argument("--repository-id")
-    memory_search.add_argument(
-        "--kind", choices=("finding", "test_gap")
-    )
-    memory_search.add_argument("--limit", type=int, default=20)
-    memory_search.add_argument(
-        "--minimum-similarity", type=float, default=0.35
-    )
-    memory_search.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-        help="Output format; compact links matches while JSON keeps complete evidence",
-    )
-
-    continuation = subparsers.add_parser(
-        "continue",
-        help=(
-            "Inspect a workflow and perform its next provider-review step only "
-            "when explicitly authorized or configured for automatic use"
-        ),
-    )
-    continuation.add_argument("workflow_id")
-    continuation.add_argument(
-        "--execute-review",
-        action="store_true",
-        help="Consume available provider allowance for the next review step",
-    )
-    continuation.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-    )
-
-    gate = subparsers.add_parser(
-        "gate",
-        help=(
-            "Consolidate Codex finalization, verification, optional commit "
-            "attestation, and workflow closure"
-        ),
-    )
-    gate.add_argument("workflow_id")
-    gate.add_argument(
-        "--execute-review",
-        action="store_true",
-        help="Run a missing repair, confirmation, or partial resume first",
-    )
-    gate.add_argument("--codex-verdict", choices=GATE_STATUSES)
-    gate.add_argument("--codex-review")
-    gate.add_argument("--verification", action="append", default=[])
-    gate.add_argument(
-        "--check-result", action="append", default=[],
-        help="JSON required-check result: name, status (passed/failed/not_run), exit_code, evidence; repeat for every check",
-    )
-    gate.add_argument("--coverage-verification", action="append", default=[])
-    gate.add_argument(
-        "--attest-commit",
-        action="store_true",
-        help="Attest each finalized repository run to its checked-out HEAD",
-    )
-    gate.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-    )
-
-    workflow = subparsers.add_parser(
-        "workflow", help="Manage a review workflow spanning one or more repositories"
-    )
-    workflow_subparsers = workflow.add_subparsers(
-        dest="workflow_command", required=True
-    )
-    workflow_start = workflow_subparsers.add_parser(
-        "start", help="Create and print a workflow ID"
-    )
-    workflow_start.add_argument("--name", help="Optional human-readable task name")
-    workflow_start.add_argument(
-        "--max-budget-usd",
-        type=float,
-        help=(
-            "Deprecated compatibility mode: create a legacy lineage with the "
-            "old API-equivalent cap; omit for provider-usage behavior"
-        ),
-    )
-    workflow_start.add_argument(
-        "--max-provider-attempts",
-        type=int,
-        help="Per-provider attempt ceiling across this workflow lineage",
-    )
-    workflow_start.add_argument(
-        "--provider-use-policy",
-        choices=sorted(PROVIDER_USE_POLICIES),
-        help="Override explicit versus automatic provider execution",
-    )
-    workflow_start.add_argument(
-        "--review-mode",
-        choices=sorted(REVIEW_MODES),
-        default=DEFAULT_REVIEW_MODE,
-        help=(
-            "Adaptive review depth: fast allows one repair, balanced two, "
-            "and deep three; every mode still requires confirmation"
-        ),
-    )
-    workflow_status_parser = workflow_subparsers.add_parser(
-        "status", help="Check latest finalized round for each repository"
-    )
-    workflow_status_parser.add_argument("workflow_id")
-    workflow_status_parser.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-        help="Output format; JSON remains the complete machine-readable default",
-    )
-    workflow_raise_attempts_parser = workflow_subparsers.add_parser(
-        "raise-provider-attempt-limit",
-        help=(
-            "Explicitly and auditably increase the active lineage's provider "
-            "attempt ceiling"
-        ),
-    )
-    workflow_raise_attempts_parser.add_argument("workflow_id")
-    workflow_raise_attempts_parser.add_argument("--to", type=int, required=True)
-    workflow_raise_attempts_parser.add_argument("--reason", required=True)
-    workflow_audit_parser = workflow_subparsers.add_parser(
-        "audit", help="Read-only lifecycle audit across all stored workflows"
-    )
-    workflow_audit_parser.add_argument("--stale-days", type=int, default=7)
-    workflow_audit_parser.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("json", "compact"),
-        default="json",
-        help="Output format; JSON remains the complete machine-readable default",
-    )
-    workflow_finalize_parser = workflow_subparsers.add_parser(
-        "finalize", help="Write a final workflow PASS if every repository is ready"
-    )
-    workflow_finalize_parser.add_argument("workflow_id")
-    workflow_supersede_parser = workflow_subparsers.add_parser(
-        "supersede", help="Link a closed or changed workflow to its successor"
-    )
-    workflow_supersede_parser.add_argument("workflow_id")
-    workflow_supersede_parser.add_argument("--reason", required=True)
-    workflow_supersede_parser.add_argument("--name")
-    workflow_supersede_parser.add_argument(
-        "--by", help="Existing successor workflow; otherwise create one"
-    )
-
-    scan_parser = subparsers.add_parser(
-        "scan",
-        help=(
-            "Scan the complete outgoing snapshot for secrets/symlink escapes "
-            "without creating a review run"
-        ),
-    )
-    scan_parser.add_argument(
-        "--repo", default=".", help="Path inside the target Git repository"
-    )
-    scan_scope = scan_parser.add_mutually_exclusive_group()
-    scan_scope.add_argument("--uncommitted", action="store_true")
-    scan_scope.add_argument("--base")
-    scan_scope.add_argument("--commit")
-    scan_parser.add_argument("--path", action="append", default=[])
-    scan_parser.add_argument(
-        "--exclude-snapshot-path",
-        action="append",
-        default=[],
-        help=(
-            "Keep one exact unchanged tracked sensitive file out of the "
-            "external snapshot; repeat as needed"
-        ),
-    )
-    scan_parser.add_argument(
-        "--approve-findings",
-        action="store_true",
-        help="Create a one-shot exact-fingerprint approval token",
-    )
-
-    run_parser = subparsers.add_parser("run", help="Run a review round")
-    run_parser.add_argument(
-        "--repo", default=".", help="Path inside the target Git repository"
-    )
-    scope = run_parser.add_mutually_exclusive_group()
-    scope.add_argument(
-        "--uncommitted",
-        action="store_true",
-        help="Review staged, unstaged, and untracked changes (default)",
-    )
-    scope.add_argument("--base", help="Review the working tree against this branch")
-    scope.add_argument(
-        "--commit",
-        help=(
-            "Review exactly one checked-out commit; with --path, unrelated "
-            "working-tree changes are ignored"
-        ),
-    )
-    run_parser.add_argument(
-        "--task", help="Original intent and acceptance criteria for the change"
-    )
-    run_parser.add_argument(
-        "--criterion",
-        action="append",
-        default=[],
-        help="Pin a non-critical acceptance criterion as stable ID=exact text",
-    )
-    run_parser.add_argument(
-        "--critical-invariant",
-        action="append",
-        default=[],
-        help="Pin a gate-blocking critical invariant as stable ID=exact text",
-    )
-    run_parser.add_argument(
-        "--supplemental-of",
-        help=(
-            "Run one fresh targeted review of an unchanged finalized snapshot; "
-            "the result is supplemental evidence, not a replacement final gate"
-        ),
-    )
-    run_parser.add_argument(
-        "--reuse-contract",
-        action="store_true",
-        help=(
-            "Reuse the first completed repair's scope, paths, risks, profile, "
-            "and task; an explicit matching scope selector is allowed"
-        ),
-    )
-    run_parser.add_argument(
-        "--path",
-        action="append",
-        default=[],
-        help=(
-            "Repository-relative task path to include; repeat for multiple paths. "
-            "Unrelated dirty overlays stay outside the snapshot, but unchanged "
-            "tracked files remain visible to reviewers."
-        ),
-    )
-    run_parser.add_argument(
-        "--exclude-snapshot-path",
-        action="append",
-        default=[],
-        help=(
-            "Keep one exact unchanged tracked sensitive file out of the "
-            "external snapshot and record its hash provenance; repeat as needed"
-        ),
-    )
-    run_parser.add_argument(
-        "--risk",
-        action="append",
-        default=[],
-        choices=sorted(VALID_RISKS),
-        help="Enable a risk-specific review and verification profile",
-    )
-    run_parser.add_argument(
-        "--required-check", action="append", default=None, metavar="NAME",
-        help=(
-            "Name one required check before the first review; repeat for every check. "
-            "Pinned per repository and inherited by --reuse-contract and supplemental reviews. "
-            "Missing results block finalization; results remain controller-reported."
-        ),
-    )
-    run_parser.add_argument(
-        "--workflow-id",
-        help="Link this round to an existing multi-repository workflow",
-    )
-    run_parser.add_argument(
-        "--round",
-        type=int,
-        help="Review round number; defaults to the next completed round",
-    )
-    run_parser.add_argument(
-        "--phase",
-        choices=RUN_PHASES,
-        default="repair",
-        help="Repair, confirmation, or supplemental phase (default: repair)",
-    )
-    run_parser.add_argument(
-        "--review-profile",
-        choices=sorted(REVIEW_PROFILES),
-        default="normal",
-        help="Domain-specific reviewer focus (default: normal)",
-    )
-    run_parser.add_argument("--with-claude", action="store_true")
-    run_parser.add_argument("--without-claude", action="store_true")
-    run_parser.add_argument("--with-codex", action="store_true")
-    run_parser.add_argument("--without-codex", action="store_true")
-    run_parser.add_argument(
-        "--with-antigravity",
-        "--with-gemini",
-        dest="with_antigravity",
-        action="store_true",
-    )
-    run_parser.add_argument(
-        "--without-antigravity",
-        "--without-gemini",
-        dest="without_antigravity",
-        action="store_true",
-    )
-    run_parser.add_argument("--with-kimi", action="store_true")
-    run_parser.add_argument("--without-kimi", action="store_true")
-    run_parser.add_argument("--claude-model")
-    run_parser.add_argument(
-        "--codex-model",
-        help=(
-            "Codex reviewer model (for example gpt-6-astra); default uses the "
-            "isolated CLI default, not the controller's model"
-        ),
-    )
-    run_parser.add_argument(
-        "--claude-effort", choices=sorted(CLAUDE_EFFORTS)
-    )
-    run_parser.add_argument("--claude-max-budget-usd", type=float)
-    run_parser.add_argument(
-        "--antigravity-model",
-        "--gemini-model",
-        dest="antigravity_model",
-    )
-    run_parser.add_argument("--kimi-model")
-    run_parser.add_argument(
-        "--timeout-minutes",
-        type=int,
-        default=DEFAULT_TIMEOUT_MINUTES,
-        help=(
-            "Maximum time for each reviewer process "
-            f"(default: {DEFAULT_TIMEOUT_MINUTES})"
-        ),
-    )
-    run_parser.add_argument(
-        "--sequential",
-        action="store_true",
-        help="Run enabled reviewers one at a time instead of independently in parallel",
-    )
-    run_parser.add_argument(
-        "--allow-sensitive-paths",
-        action="store_true",
-        help=(
-            "Deprecated and rejected; sensitive paths cannot be overridden"
-        ),
-    )
-    run_parser.add_argument(
-        "--allow-sensitive-finding",
-        action="append",
-        default=[],
-        help=(
-            "Deprecated and rejected; use a one-shot token from "
-            "`merani scan --approve-findings`"
-        ),
-    )
-    run_parser.add_argument(
-        "--sensitive-scan-token",
-        help="Consume one exact-fingerprint token created by `merani scan`",
-    )
-    run_parser.add_argument(
-        "--reuse-lineage-sensitive-approvals",
-        action="store_true",
-        help=(
-            "Reuse only prior schema-11 approvals whose path, rule, line, and "
-            "content hash exactly match in this workflow lineage"
-        ),
-    )
-    run_parser.add_argument(
-        "--local-verification",
-        action="append",
-        default=[],
-        help=(
-            "Record formatter, lint/static-check, or full local-test evidence "
-            "completed after fixes and before this provider call; repeat as needed"
-        ),
-    )
-
-    resume = subparsers.add_parser(
-        "resume", help="Retry only failed reviewers for a fresh partial run"
-    )
-    resume.add_argument("--run", required=True, help="Partial review run directory")
-    resume.add_argument(
-        "--claude-effort",
-        choices=sorted(CLAUDE_EFFORTS),
-        help="One-resume Claude effort override",
-    )
-    resume.add_argument(
-        "--claude-max-budget-usd",
-        type=float,
-        help="One-resume Claude budget override",
-    )
-    resume.add_argument(
-        "--replace-failed-claude-with-codex",
-        action="store_true",
-        help=(
-            "Use a fresh read-only Codex reviewer against the same immutable "
-            "snapshot after a Claude quota, authentication, or budget stop"
-        ),
-    )
-
-    decide = subparsers.add_parser(
-        "decide", help="Record Codex's evidence-backed disposition for one finding"
-    )
-    decide.add_argument("--run", required=True, help="Review run directory")
-    decide.add_argument("--finding", required=True)
-    decide.add_argument(
-        "--decision",
-        required=True,
-        choices=sorted(
-            VALID_DECISIONS
-            | VALID_TEST_GAP_DECISIONS
-            | VALID_OBSERVATION_DECISIONS
-        ),
-    )
-    decide.add_argument("--evidence", required=True)
-    decide.add_argument("--action")
-    decide.add_argument("--verification")
-    decide.add_argument(
-        "--memory-assessment",
-        choices=sorted(MEMORY_ASSESSMENTS),
-        help="Rate attached memory candidates for future retrieval calibration",
-    )
-
-    decide_batch = subparsers.add_parser(
-        "decide-batch",
-        help="Atomically record finding, test-gap, and observation decisions",
-    )
-    decide_batch.add_argument("--run", required=True, help="Review run directory")
-    decide_batch.add_argument(
-        "--item",
-        action="append",
-        default=[],
-        help=(
-            "JSON decision object with finding, decision, evidence, and "
-            "optional action/verification/memory_assessment; repeat as needed"
-        ),
-    )
-    decide_batch.add_argument(
-        "--input", help="Path to a JSON array of decision objects"
-    )
-
-    assure = subparsers.add_parser(
-        "assure",
-        help="Attach fingerprint-bound Codex evidence to one pinned claim",
-    )
-    assure.add_argument("--run", required=True, help="Completed review run directory")
-    assure.add_argument("--claim", required=True, help="Pinned claim ID")
-    assure.add_argument(
-        "--status",
-        required=True,
-        choices=("verified", "deferred", "unverified"),
-    )
-    assure.add_argument(
-        "--evidence-kind",
-        required=True,
-        choices=("repository", "test", "artifact", "runtime"),
-    )
-    assure.add_argument("--evidence", required=True)
-    assure.add_argument("--rationale")
-
-    assure_batch = subparsers.add_parser(
-        "assure-batch",
-        help="Atomically attach fingerprint-bound Codex evidence to pinned claims",
-    )
-    assure_batch.add_argument(
-        "--run", required=True, help="Completed review run directory"
-    )
-    assure_batch.add_argument(
-        "--item",
-        action="append",
-        required=True,
-        help=(
-            "JSON assurance object with claim, status, evidence_kind, evidence, "
-            "and optional rationale; repeat as needed"
-        ),
-    )
-
-    finalize = subparsers.add_parser(
-        "finalize", help="Finalize a fresh run after Codex review and verification"
-    )
-    finalize.add_argument("--run", required=True, help="Review run directory")
-    finalize.add_argument(
-        "--codex-verdict",
-        required=True,
-        choices=GATE_STATUSES,
-        help=(
-            "Codex's explicit final verdict; the machine gate uses the more "
-            "conservative result of this verdict and workflow triage"
-        ),
-    )
-    finalize.add_argument("--codex-review", required=True)
-    finalize.add_argument(
-        "--check-result", action="append", default=[],
-        help="JSON required-check result: name, status (passed/failed/not_run), exit_code, evidence; missing or unsuccessful checks block PASS",
-    )
-    finalize.add_argument(
-        "--verification",
-        action="append",
-        default=[],
-        help="Command/check and result; repeat for multiple checks",
-    )
-    finalize.add_argument(
-        "--coverage-verification",
-        action="append",
-        default=[],
-        help=(
-            "Concrete Codex inspection that compensates for explicitly "
-            "incomplete reviewer coverage; repeat as needed"
-        ),
-    )
-
-    verify = subparsers.add_parser(
-        "verify", help="Check that a finalized PASS still matches current source"
-    )
-    verify.add_argument("--run", required=True, help="Review run directory")
-    recover = subparsers.add_parser(
-        "recover", help="Mark an orphaned running review as failed"
-    )
-    recover.add_argument("--run", required=True, help="Review run directory")
-    recover.add_argument(
-        "--force",
-        action="store_true",
-        help="Recover an older run with no recorded runner PID",
-    )
-
-    attest_commit = subparsers.add_parser(
-        "attest-commit",
-        help="Bind a finalized review to an equivalent checked-out commit",
-    )
-    attest_commit.add_argument("--run", required=True, help="Review run directory")
-    attest_commit.add_argument(
-        "--commit", default="HEAD", help="Checked-out commit to attest (default: HEAD)"
-    )
-    return parser
+    return build_cli_parser()
 
 
 def main() -> int:
@@ -12669,178 +10778,54 @@ def main() -> int:
         return review_fs_mcp_command(sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
+    handlers = {
+        "status": status_command,
+        "doctor": doctor_command,
+        "install-antigravity-agent": install_antigravity_agent_command,
+        "enable": toggle_command,
+        "disable": toggle_command,
+        "set-model": set_model_command,
+        "set-effort": set_effort_command,
+        "set-budget": set_budget_command,
+        "set-claude-usage-limit": set_budget_command,
+        "set-workflow-budget": set_workflow_budget_command,
+        "set-provider-attempt-limit": set_provider_attempt_limit_command,
+        "set-provider-use-policy": set_provider_use_policy_command,
+        "analytics": analytics_command,
+        "budget-estimate": budget_estimate_command,
+        "recommend": recommend_mode_command,
+        "continue": continue_command,
+        "gate": gate_command,
+        "memory.status": memory_status_command,
+        "memory.rebuild": rebuild_memory_command,
+        "memory.compact": memory_compact_command,
+        "memory.search": memory_search_command,
+        "workflow.start": workflow_start_command,
+        "workflow.status": workflow_status_command,
+        "workflow.raise-provider-attempt-limit": workflow_raise_provider_attempt_limit_command,
+        "workflow.audit": workflow_audit_command,
+        "workflow.finalize": workflow_finalize_command,
+        "workflow.supersede": workflow_supersede_command,
+        "scan": sensitive_scan_command,
+        "resume": resume_review_command,
+        "decide": decide_command,
+        "decide-batch": decide_batch_command,
+        "assure": assure_command,
+        "assure-batch": assure_batch_command,
+        "finalize": finalize_command,
+        "verify": verify_command,
+        "recover": recover_command,
+        "attest-commit": attest_commit_command,
+        "run": run_review_command,
+    }
     try:
-        if args.command == "status":
-            return status_command(args)
-        if args.command == "doctor":
-            return doctor_command(args)
-        if args.command == "install-antigravity-agent":
-            return install_antigravity_agent_command(args)
-        if args.command in {"enable", "disable"}:
-            return toggle_command(args)
-        if args.command == "set-model":
-            return set_model_command(args)
-        if args.command == "set-effort":
-            return set_effort_command(args)
-        if args.command in {"set-budget", "set-claude-usage-limit"}:
-            return set_budget_command(args)
-        if args.command == "set-workflow-budget":
-            return set_workflow_budget_command(args)
-        if args.command == "set-provider-attempt-limit":
-            return set_provider_attempt_limit_command(args)
-        if args.command == "set-provider-use-policy":
-            return set_provider_use_policy_command(args)
-        if args.command == "analytics":
-            return analytics_command(args)
-        if args.command == "budget-estimate":
-            if args.since_days < 1:
-                raise ReviewError("--since-days must be at least 1.")
-            if (
-                args.claude_max_budget_usd is not None
-                and (
-                    not math.isfinite(args.claude_max_budget_usd)
-                    or args.claude_max_budget_usd <= 0
-                )
-            ):
-                raise ReviewError("--claude-max-budget-usd must be positive.")
-            return budget_estimate_command(args)
-        if args.command == "recommend":
-            return recommend_mode_command(args)
-        if args.command == "continue":
-            return continue_command(args)
-        if args.command == "gate":
-            if args.codex_review and len(args.codex_review) > MAX_NOTE_CHARS:
-                raise ReviewError(
-                    f"--codex-review must be at most {MAX_NOTE_CHARS} characters."
-                )
-            return gate_command(args)
-        if args.command == "memory":
-            if args.memory_command == "status":
-                return memory_status_command(args)
-            if args.memory_command == "rebuild":
-                return rebuild_memory_command(args)
-            if args.memory_command == "compact":
-                return memory_compact_command(args)
-            if args.memory_command == "search":
-                if not 0 <= args.minimum_similarity <= 1:
-                    raise ReviewError(
-                        "--minimum-similarity must be between 0 and 1."
-                    )
-                return memory_search_command(args)
-        if args.command == "workflow":
-            if args.workflow_command == "start":
-                return workflow_start_command(args)
-            if args.workflow_command == "status":
-                return workflow_status_command(args)
-            if args.workflow_command == "raise-provider-attempt-limit":
-                return workflow_raise_provider_attempt_limit_command(args)
-            if args.workflow_command == "audit":
-                return workflow_audit_command(args)
-            if args.workflow_command == "finalize":
-                return workflow_finalize_command(args)
-            if args.workflow_command == "supersede":
-                return workflow_supersede_command(args)
-        if args.command == "scan":
-            return sensitive_scan_command(args)
-        if args.command == "resume":
-            if (
-                args.claude_max_budget_usd is not None
-                and (
-                    not math.isfinite(args.claude_max_budget_usd)
-                    or args.claude_max_budget_usd <= 0
-                )
-            ):
-                raise ReviewError("--claude-max-budget-usd must be positive.")
-            return resume_review_command(args)
-        if args.command == "decide":
-            for field in ("evidence", "action", "verification"):
-                value = getattr(args, field, None)
-                if value and len(value) > MAX_NOTE_CHARS:
-                    raise ReviewError(
-                        f"--{field.replace('_', '-')} must be at most "
-                        f"{MAX_NOTE_CHARS} characters."
-                    )
-            return decide_command(args)
-        if args.command == "decide-batch":
-            return decide_batch_command(args)
-        if args.command == "assure":
-            return assure_command(args)
-        if args.command == "assure-batch":
-            return assure_batch_command(args)
-        if args.command == "finalize":
-            if len(args.codex_review) > MAX_NOTE_CHARS:
-                raise ReviewError(
-                    f"--codex-review must be at most {MAX_NOTE_CHARS} characters."
-                )
-            return finalize_command(args)
-        if args.command == "verify":
-            return verify_command(args)
-        if args.command == "recover":
-            return recover_command(args)
-        if args.command == "attest-commit":
-            return attest_commit_command(args)
-        if args.command == "run":
-            if args.phase == "supplemental" and not args.supplemental_of:
-                raise ReviewError(
-                    "Use --supplemental-of <final-run> to start a supplemental review."
-                )
-            if args.supplemental_of and (
-                args.path
-                or args.risk
-                or args.criterion
-                or args.critical_invariant
-                or args.review_profile != "normal"
-                or args.uncommitted
-                or args.base
-                or args.commit
-            ):
-                raise ReviewError(
-                    "--supplemental-of reuses the finalized source contract; do not "
-                    "override scope, paths, risks, claims, or review profile."
-                )
-            if args.with_claude and args.without_claude:
-                raise ReviewError("Choose only one of --with-claude/--without-claude.")
-            if args.with_codex and args.without_codex:
-                raise ReviewError("Choose only one of --with-codex/--without-codex.")
-            if args.with_antigravity and args.without_antigravity:
-                raise ReviewError(
-                    "Choose only one of "
-                    "--with-antigravity/--without-antigravity."
-                )
-            if args.with_kimi and args.without_kimi:
-                raise ReviewError("Choose only one of --with-kimi/--without-kimi.")
-            if args.timeout_minutes < 1:
-                raise ReviewError("--timeout-minutes must be at least 1.")
-            if args.round is not None and args.round < 1:
-                raise ReviewError("--round must be at least 1.")
-            if (
-                args.claude_max_budget_usd is not None
-                and (
-                    not math.isfinite(args.claude_max_budget_usd)
-                    or args.claude_max_budget_usd <= 0
-                )
-            ):
-                raise ReviewError("--claude-max-budget-usd must be positive.")
-            if args.task and len(args.task) > MAX_TASK_CHARS:
-                raise ReviewError(
-                    f"--task must be at most {MAX_TASK_CHARS} characters."
-                )
-            if any(
-                len(value) > MAX_TASK_CHARS
-                for value in [*args.criterion, *args.critical_invariant]
-            ):
-                raise ReviewError(
-                    f"Each assurance claim must be at most {MAX_TASK_CHARS} characters."
-                )
-            return run_review_command(args)
-        parser.error(f"Unknown command: {args.command}")
+        return dispatch_cli_command(args, handlers)
     except KeyboardInterrupt:
         print("error: review interrupted", file=sys.stderr)
         return 130
     except ReviewError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    return 2
 
 
 if __name__ == "__main__":

@@ -39,6 +39,11 @@ changed finding still requires a new one-shot scan token.
 
 ## Failed reviewers and allowance
 
+When Claude reports an authentication failure, run `claude auth status` in the
+same execution boundary before retrying. A terminal login may not be visible in
+the agent sandbox. A definite logged-out preflight consumes no provider attempt;
+an authentication failure after launch remains a recorded attempt.
+
 If one reviewer fails after another returns a valid report, the run becomes
 `partial`. Keep the source unchanged and resume it so successful reviewers are
 not invoked again:

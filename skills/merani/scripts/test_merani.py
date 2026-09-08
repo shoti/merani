@@ -28,9 +28,12 @@ assert SPEC and SPEC.loader
 MM = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MM
 SPEC.loader.exec_module(MM)
-import evidence_memory as EM
-import assurance as AM
-import review_contract as RC
+import merani_core.adapters.evidence_memory as EM
+import merani_core.domain.assurance as AM
+import merani_core.domain.review_contract as RC
+from tests.unit.test_architecture import ArchitectureTests
+from tests.unit.test_core_policies import CorePolicyTests
+from tests.compatibility.test_launcher import LauncherCompatibilityTests
 
 PASSED_CHECK = {
     "name": "fixture regression suite", "status": "passed",
@@ -213,6 +216,9 @@ class FakeProviderHarness:
                     print("Logged in using ChatGPT")
                     raise SystemExit(0)
                 if provider == "claude" and args == ["auth", "status"]:
+                    if os.environ.get("MM_FAKE_CLAUDE_LOGGED_OUT"):
+                        print(json.dumps({"loggedIn": False, "authMethod": "none"}))
+                        raise SystemExit(1)
                     print(json.dumps({"loggedIn": True, "authMethod": "oauth", "subscription": "synthetic"}))
                     raise SystemExit(0)
                 if provider == "agy" and args == ["models"]:
@@ -1669,6 +1675,9 @@ class RunnerUnitTests(unittest.TestCase):
         with (
             mock.patch.object(MM, "version_of", return_value="test"),
             mock.patch.object(MM.shutil, "which", return_value="/fake/claude"),
+            mock.patch.object(
+                MM, "provider_readiness", return_value=MM.ProviderReadiness(True, "fixture")
+            ),
         ):
             reviewer = MM.reviewer_definitions(args, config)[0]
         self.assertEqual(
@@ -10011,7 +10020,7 @@ None.
         with mock.patch.object(
             MM,
             "claude_authentication_mode",
-            return_value=("subscription", "Claude subscription authentication"),
+            return_value=("subscription", "Claude subscription authentication", True),
         ):
             resource = MM.reviewer_resource_metadata(reviewer)
         self.assertEqual(resource["authentication_mode"], "subscription")
@@ -10695,6 +10704,34 @@ None.
 
 
 class RunnerEndToEndTests(unittest.TestCase):
+    def test_logged_out_claude_preflight_records_evidence_without_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.environment.pop("ANTHROPIC_API_KEY", None)
+            harness.environment["MM_FAKE_CLAUDE_LOGGED_OUT"] = "1"
+            workflow = harness.cli(repo, "workflow", "start").stdout.strip()
+            blocked = harness.cli(
+                repo,
+                "run", "--workflow-id", workflow, "--uncommitted",
+                "--required-check", PASSED_CHECK["name"],
+                check=False,
+                provider_backed=True,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("not logged in", blocked.stderr)
+            self.assertEqual(harness.invocations(), [])
+            metadata = MM.read_json(harness.run_directories()[0] / "metadata.json")
+            self.assertEqual(metadata["status"], "preflight_blocked")
+            state = json.loads(
+                harness.cli(repo, "workflow", "status", workflow, check=False).stdout
+            )
+            self.assertEqual(state["metrics"]["reviewer_invocations"], 0)
+
     def test_check_plan_and_informational_observations_through_final_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
