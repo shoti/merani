@@ -38,7 +38,8 @@ def plan_workflow_continuation(
         "workflow_id": identifier,
         "state": state,
         "ready": ready,
-        "deployment_ready": bool(status.get("deployment_ready")),
+        "review_commit_ready": bool(status.get("review_commit_ready")),
+        "deployment_ready": False,
         "provider_usage": usage,
         "actions": [],
         "checked_at": utc_now(),
@@ -86,7 +87,7 @@ def plan_workflow_continuation(
         return plan
     if state in {"completed", "completed_untrusted"}:
         plan["next"] = "COMPLETE" if state == "completed" else "BLOCKED"
-        if state == "completed" and not status.get("deployment_ready"):
+        if state == "completed" and not status.get("review_commit_ready"):
             plan["post_commit_actions"] = [
                 {
                     "repository": (
@@ -107,7 +108,7 @@ def plan_workflow_continuation(
                 for item in status.get("repositories", [])
                 if isinstance(item, dict)
                 and item.get("phase") != "supplemental"
-                and not item.get("deployment_ready")
+                and not item.get("review_commit_ready")
             ]
         return plan
     if state == "superseded":

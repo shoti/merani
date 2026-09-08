@@ -40,11 +40,12 @@ invalidates the gate. If attestation fails, report that failure explicitly;
 do not imply that the commit was bound merely because the branch head matches
 its remote.
 
-When the user explicitly authorizes both commit and push, also produce a
-concise GitHub PR description after the push and write it to the branch's open
-PR, or create the PR when none is open. This is part of the handoff even when
-the user does not separately ask for PR copy. Base the description on the
-verified task evidence and choose the matching shape:
+Create or update a pull request only when the user explicitly authorizes that
+PR write. Branch creation, commit, push, PR creation or update, merge, release,
+deployment, and production mutation are separate authority boundaries. A
+commit-and-push request does not imply PR permission. When a PR write is
+authorized, base its description on the verified task evidence and choose the
+matching shape:
 
 - Evidence-based fix: `## Production evidence` gives the shortest useful
   causal timeline, impact/scope, and relevant current state; `## Fix` explains
@@ -65,10 +66,8 @@ lists, changed-file inventories, review workflow metadata, and low-level
 implementation detail. Mention compatibility, rollout, migration, or known
 limitations only when they materially affect the merge decision.
 
-An explicit request to commit and push also authorizes creating the branch's PR
-with the generated description or updating its open PR. A commit-only,
-push-only, or copy-only request does not authorize a PR write. An explicit
-open/create/update-PR request remains sufficient authority as well. These writes
+An explicit open/create/update-PR request authorizes only the named PR action.
+A copy-only request authorizes drafting text without a GitHub write. PR writes
 require an authenticated GitHub CLI:
 
 1. Run `gh auth status --hostname github.com` without printing or retrieving the
@@ -77,8 +76,8 @@ require an authenticated GitHub CLI:
    them are ambiguous or mismatched.
 2. Look up open PRs for the exact head branch before writing. If one exists,
    read its number, URL, state, title, body, base, and head. If none is open, a
-   commit-and-push or create-PR request authorizes creating one against the
-   verified base; an update-only request does not. Never reopen a closed PR
+   create-PR request authorizes creating one against the verified base; an
+   update-only request does not. Never reopen a closed PR
    unless explicitly requested. If an open PR body contains material human
    content rather than only the repository's blank template, show the proposed
    replacement and obtain explicit approval before overwriting it.

@@ -19,6 +19,9 @@ python3 -m unittest discover \
   -t skills/merani/scripts
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
+for file in skills/merani/scripts/fixtures/*.json; do
+  python3 -m json.tool "$file" >/dev/null
+done
 git diff --check
 ```
 

@@ -122,8 +122,9 @@ the launcher itself have no removal date.
 - Run a fresh Merani review from a verified installed/pre-refactor runner when
   provider authorization and readiness permit. Fake-provider validation does
   not establish reviewer intelligence or live authentication.
-- Commit coherent phases, push, create the templated PR, read it back, and
-  inspect CI. Never merge or deploy.
+- Commit and push coherent phases when authorized, inspect CI for the pushed
+  SHA, and create or update a PR only under separate explicit PR authority.
+  Never merge or deploy without the corresponding authorization.
 
 ## Risks and decisions
 
@@ -133,8 +134,8 @@ the launcher itself have no removal date.
   contract requires the same safety invariant, the extracted Claude adapter
   implements it independently with focused tests as a separate reviewed change.
 - `runner_sha256` continues to identify the compatibility launcher only.
-  Recursive cache parity supplies bundle-wide identity; changing the historical
-  field would break interpretation of old artifacts.
+  `merani-bundle-v1` supplies path-and-content identity for the shipped policy
+  bundle, while recursive cache parity separately compares source and install.
 - The provider registry currently accepts the parsed CLI namespace as a
   compatibility bridge. Replace it with a small provider-selection request only
   when run/resume request types move in Phase 4.

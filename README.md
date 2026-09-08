@@ -57,6 +57,10 @@ the result still matches the reviewed code. Codex declares required checks befor
 each repository's first review with `--required-check`; missing, failed, or unrun
 results block a passing result. Informational observations need no acknowledgement.
 
+`review_commit_ready` means a trusted passing final is fresh and bound to the
+checked-out commit. The deprecated `deployment_ready` field is always false;
+local review evidence does not establish CI, deployment, or runtime behavior.
+
 Checks and supporting evidence are reported by Codex. Merani checks that every
 declared check has a result, but cannot prove every statement is true or discover
 a requirement left out of the original list.
@@ -69,6 +73,15 @@ Reviews send source to the selected providers. The snapshot includes the tracked
 repository tree for context, even when you filter the changed paths. Secret
 screening reduces accidental exposure but cannot guarantee that source is safe
 to share. See the [security policy](SECURITY.md).
+
+Merani 1.0 supports Claude CLI 2.1.248 or newer as the stable default boundary,
+using restricted evaluation mode with only `Read`, `Grep`, and `Glob`. Codex is
+a stable opt-in reviewer from the same provider family. Antigravity and Kimi
+remain experimental opt-ins because their native confinement has not been
+verified to the same level. `doctor` reports the exact capability matrix and
+separates definite host logout, sandbox-boundary unavailability, unknown
+authentication, and verified readiness.
+See [reviewer configuration](skills/merani/references/providers.md).
 
 ## More detail
 

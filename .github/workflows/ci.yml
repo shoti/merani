@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "shoti/merani-v1-stability-*"]
   pull_request:
   workflow_dispatch:
 

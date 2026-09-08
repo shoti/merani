@@ -28,23 +28,37 @@ PROHIBITED_DOMAIN_CALLS = {
 
 def module_name(path: Path) -> str:
     relative = path.relative_to(PACKAGE_ROOT.parent).with_suffix("")
-    return ".".join(relative.parts)
+    parts = relative.parts[:-1] if relative.name == "__init__" else relative.parts
+    return ".".join(parts)
 
 
-def internal_imports(tree: ast.AST, current: str) -> set[str]:
+def internal_imports(
+    tree: ast.AST, current: str, *, current_is_package: bool = False
+) -> set[str]:
     result: set[str] = set()
     current_parts = current.split(".")
+    package_parts = current_parts if current_is_package else current_parts[:-1]
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             result.update(alias.name for alias in node.names if alias.name.startswith("merani_core"))
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                base = current_parts[:-node.level]
+                ascend = node.level - 1
+                base = (
+                    package_parts[: len(package_parts) - ascend]
+                    if ascend
+                    else package_parts
+                )
                 target = ".".join((*base, *(node.module or "").split(".")))
             else:
                 target = node.module or ""
             if target.startswith("merani_core"):
                 result.add(target.rstrip("."))
+                result.update(
+                    f"{target.rstrip('.')}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                )
     return result
 
 
@@ -94,7 +108,9 @@ def check(package_root: Path = PACKAGE_ROOT) -> tuple[list[str], list[str]]:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
             module = module_name(path)
-            imports = internal_imports(tree, module)
+            imports = internal_imports(
+                tree, module, current_is_package=path.name == "__init__.py"
+            )
             graph[module] = imports
             if any(
                 target == "merani" or target.startswith("merani.")
