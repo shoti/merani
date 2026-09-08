@@ -14,8 +14,14 @@ SPEC.loader.exec_module(CHECK)
 
 class ArchitectureTests(unittest.TestCase):
     def test_internal_dependency_rules(self) -> None:
-        errors, _ = CHECK.check(SCRIPT_DIR / "merani_core")
+        errors, signals = CHECK.check(SCRIPT_DIR / "merani_core")
         self.assertEqual(errors, [])
+        self.assertTrue(
+            any("merani.py" in item and "run_review_command" in item for item in signals)
+        )
+        self.assertTrue(
+            any("large module" in item and "merani.py" in item for item in signals)
+        )
 
 
 if __name__ == "__main__":

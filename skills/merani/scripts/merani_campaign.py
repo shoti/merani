@@ -25,6 +25,7 @@ from test_support.fake_provider import FakeProviderHarness
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCENARIOS_PATH = SCRIPT_DIR / "campaign" / "scenarios.json"
 GROUND_TRUTH_PATH = SCRIPT_DIR / "campaign" / "ground-truth.json"
+RECORD_SCHEMA_PATH = SCRIPT_DIR.parent / "references" / "campaign-record.schema.json"
 RECORD_VERSION = "merani-campaign-record-v1"
 MARKER = ".merani-campaign-root.json"
 MAX_CAPTURE_BYTES = 64 * 1024
@@ -111,6 +112,128 @@ def structured_report(*, finding: bool = False) -> str:
     )
 
 
+def validate_campaign_record(
+    record: dict[str, Any], schema: dict[str, Any]
+) -> None:
+    """Enforce the versioned record fields without a JSON Schema dependency."""
+    missing = sorted(set(schema.get("required", [])) - set(record))
+    if missing:
+        raise ValueError(f"campaign record is missing required fields: {missing}")
+    if record.get("schema_version") != schema["properties"]["schema_version"]["const"]:
+        raise ValueError("campaign record schema version does not match its schema")
+    nonnegative_integers = ("scenario_version", "provider_invocation_count")
+    for name in nonnegative_integers:
+        value = record.get(name)
+        minimum = 1 if name == "scenario_version" else 0
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            raise ValueError(f"campaign record {name} must be an integer >= {minimum}")
+    if not isinstance(record.get("seed"), int) or isinstance(record.get("seed"), bool):
+        raise ValueError("campaign record seed must be an integer")
+    duration = record.get("duration_seconds")
+    if (
+        not isinstance(duration, (int, float))
+        or isinstance(duration, bool)
+        or duration < 0
+    ):
+        raise ValueError("campaign record duration_seconds must be non-negative")
+    if not isinstance(record.get("exit_status"), int):
+        raise ValueError("campaign record exit_status must be an integer")
+    if record.get("scenario_status") not in {"passed", "failed"}:
+        raise ValueError("campaign record scenario_status is invalid")
+    if not isinstance(record.get("fixture_manifest"), list):
+        raise ValueError("campaign record fixture_manifest must be a list")
+    commands = record.get("commands")
+    if not isinstance(commands, list) or not commands:
+        raise ValueError("campaign record commands must be a non-empty list")
+    required_command = set(
+        schema["properties"]["commands"]["items"].get("required", [])
+    )
+    for index, item in enumerate(commands):
+        if not isinstance(item, dict):
+            raise ValueError(f"campaign command {index} is not an object")
+        missing_command = sorted(required_command - set(item))
+        if missing_command:
+            raise ValueError(
+                f"campaign command {index} is missing fields: {missing_command}"
+            )
+        arguments = item.get("arguments")
+        if not isinstance(arguments, list) or not all(
+            isinstance(argument, str) for argument in arguments
+        ):
+            raise ValueError(f"campaign command {index} arguments are invalid")
+        if not all(
+            isinstance(item.get(name), str) for name in ("started_at", "ended_at")
+        ):
+            raise ValueError(f"campaign command {index} timestamps are invalid")
+        command_duration = item.get("duration_seconds")
+        if (
+            not isinstance(command_duration, (int, float))
+            or isinstance(command_duration, bool)
+            or command_duration < 0
+        ):
+            raise ValueError(f"campaign command {index} duration is invalid")
+        if not isinstance(item.get("exit_status"), int):
+            raise ValueError(f"campaign command {index} exit status is invalid")
+        invocations = item.get("provider_invocations")
+        if not isinstance(invocations, int) or invocations < 0:
+            raise ValueError(
+                f"campaign command {index} provider count is invalid"
+            )
+        for stream_name in ("stdout", "stderr"):
+            stream = item.get(stream_name)
+            if not isinstance(stream, dict):
+                raise ValueError(
+                    f"campaign command {index} {stream_name} is not an object"
+                )
+            if set(("path", "sha256", "retained_bytes", "truncated")) - set(stream):
+                raise ValueError(
+                    f"campaign command {index} {stream_name} is incomplete"
+                )
+            digest = stream.get("sha256")
+            if not isinstance(digest, str) or len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(
+                    f"campaign command {index} {stream_name} hash is invalid"
+                )
+            retained = stream.get("retained_bytes")
+            if not isinstance(retained, int) or retained < 0:
+                raise ValueError(
+                    f"campaign command {index} {stream_name} byte count is invalid"
+                )
+            if not isinstance(stream.get("truncated"), bool):
+                raise ValueError(
+                    f"campaign command {index} {stream_name} truncation is invalid"
+                )
+
+
+def validate_seeded_finding_ledger(
+    records: list[dict[str, Any]],
+    ledger: list[dict[str, Any]],
+    ground_truth: dict[str, Any],
+) -> None:
+    seeded_passed = any(
+        item.get("scenario_id") == "seeded-defect"
+        and item.get("scenario_status") == "passed"
+        for item in records
+    )
+    if not seeded_passed:
+        return
+    if ground_truth.get("discovery_claim") is not False:
+        raise ValueError("synthetic ground truth must disclaim AI discovery")
+    for defect in ground_truth.get("defects", []):
+        matches = [
+            item
+            for item in ledger
+            if item.get("classification") == "expected_seeded_application_defect"
+            and item.get("id") == defect.get("id")
+        ]
+        if len(matches) != 1 or matches[0].get("independent_ai_discovery") is not False:
+            raise ValueError(
+                f"seeded defect {defect.get('id')} lacks one explicit no-discovery ledger entry"
+            )
+
+
 class Campaign:
     def __init__(self, *, launcher: Path, output_dir: Path, seed: int, selected: set[str] | None = None) -> None:
         if not launcher.is_absolute() or not launcher.is_file():
@@ -127,6 +250,7 @@ class Campaign:
         atomic_json(self.root / MARKER, {"schema_version": 1, "root": str(self.root), "created_at": utc_now()})
         self.definition = json.loads(SCENARIOS_PATH.read_text(encoding="utf-8"))
         self.ground_truth = json.loads(GROUND_TRUTH_PATH.read_text(encoding="utf-8"))
+        self.record_schema = json.loads(RECORD_SCHEMA_PATH.read_text(encoding="utf-8"))
         self.selected = selected
         self.records: list[dict[str, Any]] = []
         self.ledger: list[dict[str, Any]] = []
@@ -269,6 +393,7 @@ class Campaign:
             "fixture_manifest": (
                 self._manifest(repo) if (repo / ".git").exists() else []
             ),
+            "commands": commands,
             "started_at": commands[0]["started_at"] if commands else utc_now(), "ended_at": commands[-1]["ended_at"] if commands else utc_now(),
             "duration_seconds": round(sum(float(item["duration_seconds"]) for item in commands), 6),
             "exit_status": 0 if passed else 1, "scenario_status": "passed" if passed else "failed",
@@ -276,6 +401,7 @@ class Campaign:
             "provider_invocation_count": sum(int(item["provider_invocations"]) for item in commands),
             "attempt_count": observed.get("attempt_count"),
         }
+        validate_campaign_record(record, self.record_schema)
         path = self.root / "records" / f"{definition['id']}.json"
         atomic_json(path, record)
         record["record_path"] = str(path.relative_to(self.root))
@@ -406,6 +532,9 @@ class Campaign:
 
     def finish(self, mode: str) -> int:
         passed = sum(item["scenario_status"] == "passed" for item in self.records)
+        validate_seeded_finding_ledger(
+            self.records, self.ledger, self.ground_truth
+        )
         summary = {
             "schema_version": "merani-campaign-summary-v1", "mode": mode,
             "seed": self.seed, "launcher": self.launcher_identity,

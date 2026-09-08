@@ -96,6 +96,26 @@ def graph_cycles(graph: dict[str, set[str]]) -> list[list[str]]:
     return cycles
 
 
+def size_signals(path: Path, source: str, tree: ast.AST) -> list[str]:
+    signals: list[str] = []
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for function in functions:
+        lines = function.end_lineno - function.lineno + 1
+        if lines >= 200:
+            signals.append(
+                f"large function: {path}:{function.lineno} "
+                f"{function.name} ({lines} lines)"
+            )
+    line_count = len(source.splitlines())
+    if line_count >= 1000:
+        signals.append(f"large module: {path} ({line_count} lines)")
+    return signals
+
+
 def check(package_root: Path = PACKAGE_ROOT) -> tuple[list[str], list[str]]:
     global PACKAGE_ROOT
     original = PACKAGE_ROOT
@@ -140,14 +160,14 @@ def check(package_root: Path = PACKAGE_ROOT) -> tuple[list[str], list[str]]:
                         called = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ""
                         if called in PROHIBITED_DOMAIN_CALLS:
                             errors.append(f"{path}:{node.lineno}: pure domain calls {called}")
-            functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-            for function in functions:
-                lines = function.end_lineno - function.lineno + 1
-                if lines >= 200:
-                    signals.append(f"large function: {path}:{function.lineno} {function.name} ({lines} lines)")
-            line_count = len(source.splitlines())
-            if line_count >= 1000:
-                signals.append(f"large module: {path} ({line_count} lines)")
+            signals.extend(size_signals(path, source, tree))
+        launcher_path = package_root.parent / "merani.py"
+        if launcher_path.is_file():
+            launcher_source = launcher_path.read_text(encoding="utf-8")
+            launcher_tree = ast.parse(launcher_source, filename=str(launcher_path))
+            signals.extend(
+                size_signals(launcher_path, launcher_source, launcher_tree)
+            )
         for cycle in graph_cycles(graph):
             errors.append("circular internal dependency: " + " -> ".join(cycle))
         return sorted(set(errors)), sorted(set(signals))

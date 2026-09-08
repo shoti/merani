@@ -27,6 +27,16 @@ synthetic application defect, and one expected protective block. The queued
 finding matched the separate ground truth and oracle; this validates mechanics
 and is not an AI-discovery result.
 
+An advisory review after commit `a635f33` found one confirmed campaign-contract
+defect: generated records omitted `commands` even though the versioned schema
+required it. The retained pre-fix active-install records reproduce the omission.
+The successor change persists bounded normalized command entries, validates
+required record fields during every campaign, and adds regressions for schema
+conformance and the no-independent-discovery ledger label. The same review found
+launcher size visibility and ordinary artifact retention gaps; the architecture
+checker now emits launcher size signals and the reflection documentation states
+that no automatic retention policy exists.
+
 The small matched stress workload used 107 fixture files, 11 workflow documents,
 two zero-sleep fake provider runs, and five repetitions per query:
 

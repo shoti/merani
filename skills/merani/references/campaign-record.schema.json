@@ -32,7 +32,45 @@
     "exit_status": {"type": "integer"},
     "scenario_status": {"enum": ["passed", "failed"]},
     "provider_invocation_count": {"type": "integer", "minimum": 0},
-    "commands": {"type": "array"},
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "arguments",
+          "started_at",
+          "ended_at",
+          "duration_seconds",
+          "exit_status",
+          "stdout",
+          "stderr",
+          "provider_invocations"
+        ],
+        "properties": {
+          "arguments": {"type": "array", "items": {"type": "string"}},
+          "started_at": {"type": "string"},
+          "ended_at": {"type": "string"},
+          "duration_seconds": {"type": "number", "minimum": 0},
+          "exit_status": {"type": "integer"},
+          "provider_invocations": {"type": "integer", "minimum": 0},
+          "stdout": {"$ref": "#/$defs/stream"},
+          "stderr": {"$ref": "#/$defs/stream"}
+        }
+      }
+    },
     "fixture_manifest": {"type": "array"}
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "required": ["path", "sha256", "retained_bytes", "truncated"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "retained_bytes": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"}
+      }
+    }
   }
 }

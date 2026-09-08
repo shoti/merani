@@ -50,6 +50,62 @@ class CampaignSupportTests(unittest.TestCase):
         truth = json.loads(campaign.GROUND_TRUTH_PATH.read_text(encoding="utf-8"))
         self.assertFalse(truth["discovery_claim"])
 
+    def test_record_contract_persists_replayable_commands(self) -> None:
+        schema = json.loads(campaign.RECORD_SCHEMA_PATH.read_text(encoding="utf-8"))
+        command = {
+            "arguments": ["run", "--uncommitted"],
+            "started_at": "2026-09-09T00:00:00+00:00",
+            "ended_at": "2026-09-09T00:00:01+00:00",
+            "duration_seconds": 1.0,
+            "exit_status": 0,
+            "stdout": {
+                "path": "evidence/example/stdout.txt", "sha256": "a" * 64,
+                "retained_bytes": 0, "truncated": False,
+            },
+            "stderr": {
+                "path": "evidence/example/stderr.txt", "sha256": "b" * 64,
+                "retained_bytes": 0, "truncated": False,
+            },
+            "provider_invocations": 1,
+        }
+        record = {
+            "schema_version": campaign.RECORD_VERSION,
+            "scenario_id": "example",
+            "scenario_version": 1,
+            "seed": 20260909,
+            "baseline_sha": None,
+            "candidate_sha": None,
+            "bundle_identity": {},
+            "platform": {},
+            "fixture_manifest": [],
+            "commands": [command],
+            "started_at": "2026-09-09T00:00:00+00:00",
+            "ended_at": "2026-09-09T00:00:01+00:00",
+            "duration_seconds": 1.0,
+            "exit_status": 0,
+            "scenario_status": "passed",
+            "expected": "synthetic",
+            "observed": {},
+            "provider_invocation_count": 1,
+        }
+        campaign.validate_campaign_record(record, schema)
+        del record["commands"]
+        with self.assertRaisesRegex(ValueError, "commands"):
+            campaign.validate_campaign_record(record, schema)
+
+    def test_seeded_ledger_must_disclaim_independent_discovery(self) -> None:
+        records = [{"scenario_id": "seeded-defect", "scenario_status": "passed"}]
+        truth = json.loads(campaign.GROUND_TRUTH_PATH.read_text(encoding="utf-8"))
+        ledger = [{
+            "classification": "expected_seeded_application_defect",
+            "id": "SYNTH-001",
+            "independent_ai_discovery": False,
+        }]
+        campaign.validate_seeded_finding_ledger(records, ledger, truth)
+        ledger[0]["independent_ai_discovery"] = True
+        with self.assertRaisesRegex(ValueError, "no-discovery"):
+            campaign.validate_seeded_finding_ledger(records, ledger, truth)
+
 
 if __name__ == "__main__":
     unittest.main()

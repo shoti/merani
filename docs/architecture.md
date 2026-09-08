@@ -96,6 +96,12 @@ read/check/write boundary; the mapping and removal conditions are in
 `docs/refactoring-plan.md`. This is deliberate visibility, not a claim that
 moving 1,500 lines completes the whole decomposition.
 
+At the testing/reflection campaign commit `a635f33`, `merani.py` still contains
+12,306 lines and 269 top-level functions. `run_review_command` is 828 lines,
+`resume_review_locked` 451, `persist_review_results` 390, and
+`finalize_command` 335. The architecture checker now reports launcher module and
+function sizes as non-failing review signals so later phases cannot hide growth.
+
 ## Dependency rules
 
 The dependency checker enforces these rules for `merani_core`:
