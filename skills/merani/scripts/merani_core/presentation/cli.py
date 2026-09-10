@@ -53,6 +53,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a tiny capped live probe against each enabled provider",
     )
+    doctor.add_argument(
+        "--require-github",
+        action="store_true",
+        help="Require non-interactive GitHub CLI authentication for github.com",
+    )
+    doctor.add_argument(
+        "--gcp-configuration",
+        help="Require this named gcloud configuration to be authenticated",
+    )
+    doctor.add_argument(
+        "--gcp-account",
+        help="Expected active account for --gcp-configuration",
+    )
+    doctor.add_argument(
+        "--gcp-project",
+        help="Expected project for --gcp-configuration",
+    )
     subparsers.add_parser(
         "install-antigravity-agent",
         help="Install or refresh Antigravity's hard read-only reviewer agent",
@@ -593,7 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Use a fresh read-only Codex reviewer against the same immutable "
-            "snapshot after a Claude quota, authentication, or budget stop"
+            "snapshot after a Claude quota or per-review budget stop; Claude "
+            "authentication failures require re-authentication"
         ),
     )
 

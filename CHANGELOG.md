@@ -44,9 +44,9 @@
   owners while the existing launcher, state formats, and safety gates remain
   compatible. Add dependency/cycle checks and nested test discovery on Linux
   and macOS with Python 3.12 and 3.13.
-- Preserve the pending authentication-readiness invariant independently in the
-  extracted Claude adapter: definite logged-out status blocks before launch,
-  while unavailable or unparseable status remains unknown and permitted.
+- Preserve the authentication-readiness invariant independently in the
+  extracted Claude adapter and fail closed before launch when status is logged
+  out, unavailable, or unparseable.
 
 - Pin required check names on each repository's first review with `--required-check`.
   Missing declared results block finalization; confirmation, supplemental reviews,
@@ -73,6 +73,13 @@ All notable user-visible changes are documented here. This project follows
 
 ### Fixed
 
+- Preflight Claude and its Codex quota-fallback standby before review attempts;
+  fail closed on unavailable or unconfirmed authentication. Automatically use
+  Codex on a typed Claude subscription usage limit while keeping authentication
+  failures as re-authentication blockers; reuse a successful same-round primary
+  Codex report instead of consuming another attempt. Extend session `doctor`
+  checks with optional GitHub and exact pinned GCP identity/authentication
+  requirements.
 - Accept standard MCP request metadata and pagination fields so Codex reviewer
   sessions can initialize against newer clients, and classify MCP startup
   failures separately from generic provider errors.
@@ -92,8 +99,8 @@ All notable user-visible changes are documented here. This project follows
   and mixed bullet/heading test gaps that would drop leading items.
 - Reject a Codex report unless its stream includes a subsequent completed turn;
   preserve the failed attempt and allow normal unchanged-source resume.
-- Classify expired Claude OAuth sessions as authentication failures so explicit
-  Claude-to-Codex substitution remains available with the original evidence.
+- Classify expired Claude OAuth sessions as authentication failures and retain
+  the original evidence while requiring re-authentication before retrying.
 - Clarify headless reviewer completion and instruction precedence for GPT-6,
   use the structured output instruction for both Claude and Codex, and put tool
   limitations under Coverage consistently. Document separate controller and
@@ -172,7 +179,7 @@ All notable user-visible changes are documented here. This project follows
   in an ephemeral private `CODEX_HOME`, and reject API-key or keyring-backed
   authentication.
 - Allow an explicit `resume --replace-failed-claude-with-codex` substitution
-  after typed Claude quota, authentication, or budget-stop failures while
+  after typed Claude quota or budget-stop failures while
   preserving the failed attempt, source fingerprint, and honest same-provider-
   family coverage metadata.
 

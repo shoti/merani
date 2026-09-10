@@ -8,6 +8,11 @@ argument-hint: "[uncommitted | branch <base> | commit <sha>] [with-codex | witho
 Use the [Merani skill](../skills/merani/SKILL.md) as the workflow contract and
 complete its review-and-repair loop for the current repository.
 
+Run the skill's required session `doctor` preflight before starting the
+workflow. Include its GitHub or pinned GCP authentication options only when the
+requested task needs those external services, and stop for user re-authentication
+if a required check fails.
+
 Map `$ARGUMENTS` to the existing runner options:
 
 - Default or `uncommitted`: staged, unstaged, and untracked changes.

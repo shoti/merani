@@ -13,14 +13,26 @@ fresh review round, not another user permission prompt.
 
 ## Before reviewing
 
-- Read the repository instructions, identify the target repositories and changes,
-  and finish initial local checks. Review stable source.
+- Read the repository instructions and identify the target repositories and
+  external services. Before starting a workflow or doing provider-backed work,
+  run `doctor`. Add `--require-github` when the task needs GitHub CLI access. For
+  GCP work, add the exact `--gcp-configuration`, `--gcp-account`, and
+  `--gcp-project` required by the repository instructions. If any required
+  authentication is unavailable or expired, stop before the review session,
+  ask the user to re-authenticate in the same execution boundary, and rerun
+  `doctor` until it passes. Then finish initial local checks and review stable
+  source.
 - Use Python 3.12+. Invoke `python3 <skill-dir>/scripts/merani.py`; the examples
   below use `merani` as shorthand, not a guaranteed installed PATH command.
-- Run `doctor` when starting a review session. Check the reported bundle identity
-  and cache parity. During plugin development, invoke the intended source runner.
-- Preserve saved reviewer choices. Claude is the default; other providers are
-  opt-in. A fresh Codex reviewer is same-provider-family evidence. For model,
+- Check `doctor`'s reported bundle identity and cache parity. It also validates
+  the Codex standby used for automatic Claude quota fallback. During plugin
+  development, invoke the intended source runner.
+- Preserve saved reviewer choices. Claude is the default; other primary
+  reviewers are opt-in. If a Claude-only review reaches a typed subscription
+  usage limit, Merani automatically runs a fresh Codex reviewer against the
+  same immutable snapshot. A fresh Codex reviewer is same-provider-family
+  evidence. Claude authentication failures never trigger this substitution;
+  restore authentication and rerun the session preflight. For model,
   authentication, or provider changes, read [providers.md](references/providers.md).
 - Select `fast` for small, low-risk changes, `balanced` for ordinary features and
   fixes, and `deep` for auth, money, trading, data writes, migrations, email,
