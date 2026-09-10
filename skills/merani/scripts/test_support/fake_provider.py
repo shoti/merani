@@ -121,6 +121,9 @@ if provider == "codex" and args == ["exec", "--help"]:
     print("--config --disable --ephemeral --ignore-rules --ignore-user-config --json --output-schema --profile --skip-git-repo-check --strict-config")
     raise SystemExit(0)
 if provider == "codex" and args == ["login", "status"]:
+    if os.environ.get("MM_FAKE_CODEX_LOGGED_OUT"):
+        print("Not logged in", file=sys.stderr)
+        raise SystemExit(1)
     print("Logged in using ChatGPT")
     raise SystemExit(0)
 if provider == "claude" and args == ["auth", "status"]:

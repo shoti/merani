@@ -79,6 +79,7 @@ skills/merani/scripts/
       workflows.py                 read-only continuation planning
     adapters/
       storage.py, locking.py, storage_metrics.py, evidence_memory.py
+      external_auth.py              task-required CLI authentication probes
       reflection.py                 bounded reads and atomic publication
       providers/
         registry.py, claude.py, codex.py, antigravity.py, kimi.py
@@ -226,7 +227,10 @@ persists raw and normalized evidence. All provider streams use bounded pipe
 readers; crossing a byte limit terminates the owned process group and records
 the observed count as an incomplete lower bound. Resume holds the run lock,
 rejects changed source, preserves successful and failed attempts, reserves
-lineage allowance, and retries only eligible failures. Cleanup releases
+lineage allowance, and retries only eligible failures. A Claude-only run
+preflights and reserves Codex standby headroom, automatically substituting it
+only for a typed Claude subscription quota failure on the same snapshot.
+Authentication failures remain re-authentication blockers. Cleanup releases
 reservations even when execution raises.
 
 ### Concurrent admission

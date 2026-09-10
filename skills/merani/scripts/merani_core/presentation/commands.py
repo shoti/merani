@@ -23,7 +23,18 @@ def _validate_positive_budget(args: argparse.Namespace) -> None:
 def dispatch(args: argparse.Namespace, handlers: Mapping[str, Handler]) -> int:
     """Validate presentation-level combinations and call one application handler."""
     key = args.command
-    if key == "budget-estimate":
+    if key == "doctor":
+        gcp_values = (
+            args.gcp_configuration,
+            args.gcp_account,
+            args.gcp_project,
+        )
+        if any(gcp_values) and not all(gcp_values):
+            raise ReviewError(
+                "--gcp-configuration, --gcp-account, and --gcp-project must "
+                "be supplied together."
+            )
+    elif key == "budget-estimate":
         if args.since_days < 1:
             raise ReviewError("--since-days must be at least 1.")
         _validate_positive_budget(args)

@@ -17,8 +17,11 @@ findings, and keep the result tied to the code that was reviewed.
    updates without calling another provider or changing the final gate.
 
 Claude Code is the default reviewer. A separate Codex session, Antigravity
-(Gemini), and Kimi are optional. The Codex option gives you a fresh session,
-but it is still the same model provider as the controller.
+(Gemini), and Kimi are optional primary reviewers. Merani preflights Codex as a
+standby and automatically switches to it on a typed Claude subscription usage
+limit, using the same immutable snapshot. Authentication failures block before
+the review and require re-authentication. Codex is still the same model provider
+as the controller.
 
 ## When it helps
 
@@ -43,6 +46,10 @@ codex plugin add merani@merani
 Start a new Codex thread, then ask:
 
 > Use $merani to review my uncommitted changes in src/feature and tests/feature.
+
+At the start of that thread Merani runs `doctor` before creating a workflow.
+Tasks that need GitHub or GCP add explicit authentication requirements; local
+reviews do not require unrelated cloud accounts.
 
 Or use the command:
 

@@ -111,6 +111,10 @@ from merani_core.adapters.providers.registry import (
     decode_output as decode_provider_output,
 )
 from merani_core.adapters.providers.claude import interpret_auth_status
+from merani_core.adapters.external_auth import (
+    gcp_auth_readiness,
+    github_auth_readiness,
+)
 from merani_core.adapters.locking import (
     exclusive_file_lock as locked_file,
     exclusive_file_locks as locked_files,
@@ -2446,6 +2450,34 @@ def reviewer_definitions(
         readiness=provider_readiness,
         launcher_path=Path(__file__).resolve(),
     )
+
+
+def claude_quota_fallback_reviewer(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    reviewers: Sequence[Reviewer],
+) -> Reviewer | None:
+    """Build the Codex standby required for a Claude-only quota fallback."""
+    names = {reviewer.name for reviewer in reviewers}
+    if "claude" not in names or "codex" in names:
+        return None
+    fallback_values = dict(vars(args))
+    for provider in PROVIDERS:
+        fallback_values[f"with_{provider}"] = provider == "codex"
+        fallback_values[f"without_{provider}"] = provider != "codex"
+    try:
+        fallback = reviewer_definitions(
+            argparse.Namespace(**fallback_values), config
+        )[0]
+    except ReviewError as exc:
+        raise ReviewError(
+            "Claude review cannot start because its automatic quota fallback "
+            "requires a ready Codex reviewer. Run `merani doctor` and resolve "
+            "the reported Codex readiness issue before retrying; if login is "
+            "unavailable, restore it with `codex login`. "
+            f"Detail: {exc}"
+        ) from exc
+    return fallback
 
 
 def terminate_process_group(
@@ -5225,7 +5257,6 @@ def apply_workflow_budget(
             minimum_provider_budget_usd=minimum_provider_budget_usd,
         )
         return adjusted, status
-
     lineage_root = workflow_lineage_root(identifier)
     lineage_budget_lock = WORKFLOWS_DIR / f"{lineage_root}.lineage-budget"
     path = workflow_path(identifier)
@@ -5280,6 +5311,49 @@ def apply_workflow_budget(
                 workflow["budget_reservations"] = reservations
                 safe_write_json(path, workflow)
         return adjusted, status
+
+
+def reserve_reviewers_with_quota_fallback(
+    reviewers: Sequence[Reviewer],
+    fallback: Reviewer | None,
+    identifier: str,
+    *,
+    reservation_id: str,
+    minimum_provider_budget_usd: float,
+) -> tuple[list[Reviewer], dict[str, Any] | None]:
+    """Reserve primary reviewers and the optional Codex quota standby."""
+    candidates = list(reviewers)
+    if fallback is not None:
+        candidates.append(fallback)
+    selected, budget = apply_workflow_budget(
+        candidates,
+        identifier,
+        reservation_id=reservation_id,
+        minimum_provider_budget_usd=minimum_provider_budget_usd,
+    )
+    selected_names = {reviewer.name for reviewer in selected}
+    primary_names = {reviewer.name for reviewer in reviewers}
+    selected_primary = [
+        reviewer for reviewer in selected if reviewer.name in primary_names
+    ]
+    missing_required: list[str] = []
+    if not selected_primary:
+        missing_required.extend(sorted(primary_names))
+    if fallback is not None and fallback.name not in selected_names:
+        missing_required.append(fallback.name)
+    if missing_required:
+        release_workflow_budget_reservation(identifier, reservation_id)
+        skipped = budget.get("skipped_providers") if isinstance(budget, dict) else {}
+        skipped = skipped if isinstance(skipped, dict) else {}
+        detail = "; ".join(
+            f"{name}: {skipped.get(name, 'provider attempt is unavailable')}"
+            for name in sorted(set(missing_required))
+        )
+        raise ReviewError(
+            "The review cannot start because a primary reviewer or Claude's "
+            f"Codex quota fallback has no attempt headroom: {detail}."
+        )
+    return selected_primary, budget
 
 
 def release_workflow_budget_reservation(
@@ -8710,6 +8784,91 @@ def provider_capability_matrix() -> dict[str, dict[str, Any]]:
     }
 
 
+def task_required_authentication_checks(
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Return optional external auth checks explicitly required by this task."""
+    checks: list[dict[str, Any]] = []
+    if args.require_github:
+        github = github_auth_readiness()
+        checks.append(
+            {
+                "name": "github_authentication",
+                "required": True,
+                "ok": github.ready,
+                "detail": github.detail,
+            }
+        )
+    if args.gcp_configuration:
+        gcp = gcp_auth_readiness(
+            args.gcp_configuration,
+            args.gcp_account,
+            args.gcp_project,
+        )
+        checks.append(
+            {
+                "name": "gcp_authentication",
+                "required": True,
+                "ok": gcp.ready,
+                "detail": gcp.detail,
+                "configuration": args.gcp_configuration,
+                "expected_account": args.gcp_account,
+                "expected_project": args.gcp_project,
+            }
+        )
+    return checks
+
+
+def codex_doctor_checks(
+    config: dict[str, Any],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Describe Codex primary and Claude-quota-standby readiness contracts."""
+    enabled = bool(config["codex"]["enabled"])
+    required = enabled or bool(config["claude"]["enabled"])
+    checks: list[dict[str, Any]] = []
+    if config["claude"]["enabled"]:
+        fallback_allowed = enabled or bool(
+            config["codex"].get("allow_run_override", True)
+        )
+        checks.append(
+            {
+                "name": "codex_quota_fallback_policy",
+                "required": True,
+                "ok": fallback_allowed,
+                "detail": (
+                    "Codex is available as Claude's automatic quota fallback"
+                    if fallback_allowed
+                    else "Codex is locked off; run `merani enable codex` before "
+                    "starting a Claude review"
+                ),
+            }
+        )
+    if required:
+        contract_ok, contract_detail = codex_cli_contract()
+    else:
+        contract_ok = None
+        contract_detail = "not required; CLI contract not probed"
+    checks.append(
+        {
+            "name": "codex_cli_contract",
+            "enabled": enabled,
+            "required": required,
+            "role": (
+                "primary_and_claude_quota_fallback"
+                if enabled and config["claude"]["enabled"]
+                else "primary"
+                if enabled
+                else "claude_quota_fallback"
+                if required
+                else "not_required"
+            ),
+            "ok": contract_ok,
+            "detail": contract_detail,
+        }
+    )
+    return required, checks
+
+
 def doctor_command(args: argparse.Namespace) -> int:
     os.umask(0o077)
     config = load_config()
@@ -8735,42 +8894,40 @@ def doctor_command(args: argparse.Namespace) -> int:
             "detail": claude_contract_detail,
         }
     )
-    codex_enabled = bool(config["codex"]["enabled"])
-    if codex_enabled:
-        codex_contract_ok, codex_contract_detail = codex_cli_contract()
-    else:
-        codex_contract_ok = None
-        codex_contract_detail = "disabled; CLI contract not probed"
-    checks.append(
-        {
-            "name": "codex_cli_contract",
-            "enabled": codex_enabled,
-            "ok": codex_contract_ok,
-            "detail": codex_contract_detail,
-        }
-    )
+    codex_required, codex_checks = codex_doctor_checks(config)
+    checks.extend(codex_checks)
     for provider in PROVIDERS:
         enabled = bool(config[provider]["enabled"])
+        required = enabled or (
+            provider == "codex" and bool(config["claude"]["enabled"])
+        )
         readiness = (
             provider_readiness(provider, str(config[provider]["model"]))
-            if enabled
-            else ProviderReadiness(None, "disabled; readiness not probed")
+            if required
+            else ProviderReadiness(None, "not required; readiness not probed")
         )
         checks.append(
             {
                 "name": f"{provider}_static_readiness",
                 "enabled": enabled,
+                "required": required,
+                "role": (
+                    "claude_quota_fallback"
+                    if provider == "codex" and required and not enabled
+                    else "reviewer"
+                ),
                 "locked": not bool(
                     config[provider].get("allow_run_override", True)
                 ),
                 "ok": readiness.ready,
                 "readiness_status": readiness_status(
-                    enabled=enabled, readiness=readiness
+                    enabled=required, readiness=readiness
                 ),
                 "detail": readiness.detail,
                 "models": list(readiness.models),
             }
         )
+    checks.extend(task_required_authentication_checks(args))
     if args.live:
         parser = build_parser()
         prompt = (
@@ -8855,14 +9012,22 @@ def doctor_command(args: argparse.Namespace) -> int:
     }
     if config["claude"]["enabled"]:
         enabled_static_failures.add("claude_cli_contract")
-    if config["codex"]["enabled"]:
+    if codex_required:
         enabled_static_failures.add("codex_cli_contract")
+        enabled_static_failures.add("codex_static_readiness")
+    if config["claude"]["enabled"]:
+        enabled_static_failures.add("codex_quota_fallback_policy")
+    required_external_checks = {
+        check["name"] for check in checks if check.get("required") is True
+        and check["name"] in {"github_authentication", "gcp_authentication"}
+    }
     ready = all(
         check["ok"]
         for check in checks
         if check["name"]
         in {"plugin_cache_parity", "private_storage_permissions"}
         or check["name"] in enabled_static_failures
+        or check["name"] in required_external_checks
         or check["name"].endswith("_live_probe")
     )
     print(
@@ -10985,7 +11150,14 @@ def reviewer_failure_guidance(run_dir: Path, metadata: dict[str, Any]) -> str:
         claude_category = (
             categories.get("claude") if isinstance(categories, dict) else None
         )
-        if claude_category in {"authentication", "budget_exhausted", "quota"}:
+        if claude_category == "authentication":
+            substitution = (
+                " Claude authentication must be restored before another "
+                "review starts; run `claude auth status` in the same execution "
+                "boundary, re-authenticate when needed, and rerun the session "
+                "preflight."
+            )
+        elif claude_category in {"budget_exhausted", "quota"}:
             substitution = (
                 " Or explicitly substitute a fresh read-only Codex session "
                 "against the same immutable snapshot with `merani resume "
@@ -10998,6 +11170,60 @@ def reviewer_failure_guidance(run_dir: Path, metadata: dict[str, Any]) -> str:
         f"{run_dir}` after readiness is restored."
         + substitution
     )
+
+
+def automatic_claude_quota_fallback_needed(metadata: dict[str, Any]) -> bool:
+    policy = metadata.get("review_policy")
+    if not isinstance(policy, dict) or not policy.get(
+        "automatic_claude_quota_fallback"
+    ):
+        return False
+    reviewers = metadata.get("reviewers")
+    claude = reviewers.get("claude") if isinstance(reviewers, dict) else None
+    return (
+        isinstance(claude, dict)
+        and claude.get("failure_category") == "quota"
+        and not claude.get("substituted_by")
+    )
+
+
+def substitute_successful_codex_for_claude_quota(
+    metadata: dict[str, Any],
+) -> bool:
+    """Record an already-successful same-snapshot Codex review as fallback."""
+    reviewers = metadata.get("reviewers")
+    if not isinstance(reviewers, dict):
+        return False
+    claude = reviewers.get("claude")
+    codex = reviewers.get("codex")
+    if (
+        not isinstance(claude, dict)
+        or not isinstance(codex, dict)
+        or int(codex.get("exit_code") or 0) != 0
+        or codex.get("report_contract_valid") is not True
+    ):
+        return False
+    recorded_at = utc_now()
+    claude["substituted_by"] = "codex"
+    claude["substitution_reason"] = "quota"
+    claude["substituted_at"] = recorded_at
+    substitutions = [
+        item
+        for item in metadata.get("provider_substitutions", [])
+        if isinstance(item, dict)
+    ]
+    substitutions.append(
+        {
+            "from": "claude",
+            "to": "codex",
+            "reason": "quota",
+            "automatic": True,
+            "reused_existing_report": True,
+            "recorded_at": recorded_at,
+        }
+    )
+    metadata["provider_substitutions"] = substitutions
+    return True
 
 
 def resume_review_command(args: argparse.Namespace) -> int:
@@ -11020,6 +11246,7 @@ def resume_review_locked(
     claude_effort: str | None = None,
     claude_max_budget_usd: float | None = None,
     replace_failed_claude_with_codex: bool = False,
+    automatic_claude_quota_fallback: bool = False,
 ) -> int:
     metadata = read_json(run_dir / "metadata.json")
     schema_version = metadata.get("schema_version")
@@ -11057,10 +11284,16 @@ def resume_review_locked(
                 "Claude is not an unresolved failed reviewer in this run."
             )
         category = str(claude_item.get("failure_category") or "")
-        if category not in {"authentication", "budget_exhausted", "quota"}:
+        allowed_categories = (
+            {"quota"}
+            if automatic_claude_quota_fallback
+            else {"budget_exhausted", "quota"}
+        )
+        if category not in allowed_categories:
             raise ReviewError(
                 "Codex substitution is allowed only after a typed Claude "
-                "authentication, budget, or quota failure; this failure is "
+                "budget or quota failure; Claude authentication failures "
+                "require re-authentication. This failure is "
                 f"{category or 'unclassified'}."
             )
         existing_codex = reviewer_metadata.get("codex")
@@ -11074,6 +11307,7 @@ def resume_review_locked(
             "from": "claude",
             "to": "codex",
             "reason": category,
+            "automatic": automatic_claude_quota_fallback,
             "recorded_at": utc_now(),
         }
         claude_item["substituted_by"] = "codex"
@@ -11200,7 +11434,20 @@ def resume_review_locked(
     if "codex" in failed_names and isinstance(codex, dict):
         command.extend(["--codex-model", str(codex.get("model") or "default")])
     review_args = build_parser().parse_args(command)
-    reviewers = reviewer_definitions(review_args, load_config())
+    config = load_config()
+    reviewers = reviewer_definitions(review_args, config)
+    existing_codex = reviewer_metadata.get("codex")
+    existing_codex_success = (
+        isinstance(existing_codex, dict)
+        and int(existing_codex.get("exit_code") or 0) == 0
+        and existing_codex.get("report_contract_valid") is True
+    )
+    fallback = (
+        claude_quota_fallback_reviewer(review_args, config, reviewers)
+        if bool(policy.get("automatic_claude_quota_fallback"))
+        and not existing_codex_success
+        else None
+    )
     patch = (run_dir / "change.patch").read_text(encoding="utf-8")
     budget_estimates = reviewer_budget_estimates(
         reviewers,
@@ -11211,8 +11458,9 @@ def resume_review_locked(
         ),
         patch_bytes=len(patch.encode()),
     )
-    reviewers, budget = apply_workflow_budget(
+    reviewers, budget = reserve_reviewers_with_quota_fallback(
         reviewers,
+        fallback,
         str(metadata["workflow_id"]),
         reservation_id=str(metadata["run_id"]),
         minimum_provider_budget_usd=minimum_viable_reviewer_budget(
@@ -11399,6 +11647,31 @@ def resume_review_locked(
             reviewers=reviewers,
             results=results,
         )
+        if automatic_claude_quota_fallback_needed(metadata):
+            if substitute_successful_codex_for_claude_quota(metadata):
+                failures, invalid_reports = persist_review_results(
+                    run_dir=run_dir,
+                    metadata=metadata,
+                    reviewers=reviewers,
+                    results=[],
+                )
+                print(
+                    "Claude's usage limit was reached; using the successful "
+                    "Codex review from the same snapshot as the automatic "
+                    "fallback.",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Claude's usage limit was reached; automatically switching "
+                    "to the preflighted Codex reviewer on the same snapshot.",
+                    flush=True,
+                )
+                return resume_review_locked(
+                    run_dir,
+                    replace_failed_claude_with_codex=True,
+                    automatic_claude_quota_fallback=True,
+                )
         if failures:
             raise ReviewError(
                 "Resumed reviewers still failed: " + ", ".join(failures)
@@ -11853,13 +12126,15 @@ def run_review_command(args: argparse.Namespace) -> int:
             )
         metadata["local_verification_before_provider"] = local_verification
         reviewers = reviewer_definitions(args, config)
+        fallback = claude_quota_fallback_reviewer(args, config, reviewers)
         budget_estimates = reviewer_budget_estimates(
             reviewers,
             review_mode=(str(review_mode) if review_mode else None),
             patch_bytes=len(patch.encode()),
         )
-        reviewers, workflow_budget = apply_workflow_budget(
+        reviewers, workflow_budget = reserve_reviewers_with_quota_fallback(
             reviewers,
+            fallback,
             selected_workflow,
             reservation_id=run_id,
             minimum_provider_budget_usd=minimum_viable_reviewer_budget(
@@ -12104,6 +12379,10 @@ def run_review_command(args: argparse.Namespace) -> int:
                         else config["claude"].get("max_budget_usd", 1.25)
                     ),
                     "api_equivalent_usd_is_billing": False,
+                    "automatic_claude_quota_fallback": any(
+                        reviewer.name == "claude" for reviewer in reviewers
+                    ),
+                    "automatic_claude_quota_fallback_provider": "codex",
                 },
                 "workflow_usage": (
                     workflow_budget
@@ -12207,6 +12486,32 @@ def run_review_command(args: argparse.Namespace) -> int:
             reviewers=reviewers,
             results=results,
         )
+        if automatic_claude_quota_fallback_needed(metadata):
+            if substitute_successful_codex_for_claude_quota(metadata):
+                failures, invalid_reports = persist_review_results(
+                    run_dir=run_dir,
+                    metadata=metadata,
+                    reviewers=reviewers,
+                    results=[],
+                )
+                print(
+                    "Claude's usage limit was reached; using the successful "
+                    "Codex review from the same snapshot as the automatic "
+                    "fallback.",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Claude's usage limit was reached; automatically switching "
+                    "to the preflighted Codex reviewer on the same snapshot.",
+                    flush=True,
+                )
+                with exclusive_file_lock(run_dir / "resume"):
+                    return resume_review_locked(
+                        run_dir,
+                        replace_failed_claude_with_codex=True,
+                        automatic_claude_quota_fallback=True,
+                    )
         parsed_reviews = read_json(run_dir / "review-summary.json")["reviews"]
 
         print(f"Review artifacts: {run_dir}")
@@ -12215,12 +12520,21 @@ def run_review_command(args: argparse.Namespace) -> int:
             f"phase={args.phase}"
         )
         for result in results:
-            parsed = parsed_reviews[result.name]
-            state = (
-                parsed["verdict"]
-                if result.returncode == 0
-                else f"failed ({result.returncode})"
-            )
+            reviewer_state = metadata.get("reviewers", {}).get(result.name, {})
+            if isinstance(reviewer_state, dict) and reviewer_state.get(
+                "substituted_by"
+            ):
+                state = (
+                    f"substituted by {reviewer_state['substituted_by']} "
+                    f"({reviewer_state.get('substitution_reason', 'provider failure')})"
+                )
+            else:
+                parsed = parsed_reviews[result.name]
+                state = (
+                    parsed["verdict"]
+                    if result.returncode == 0
+                    else f"failed ({result.returncode})"
+                )
             print(
                 f"- {result.name}: {state}; "
                 f"{result.duration_seconds:.1f}s; report={result.report_path}"
