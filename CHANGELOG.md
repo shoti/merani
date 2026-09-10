@@ -73,6 +73,12 @@ All notable user-visible changes are documented here. This project follows
 
 ### Fixed
 
+- Accept standard MCP request metadata and pagination fields so Codex reviewer
+  sessions can initialize against newer clients, and classify MCP startup
+  failures separately from generic provider errors.
+- Clear recovered run failures after a successful resume and reconcile durable
+  provider receipts with parsed report results so analytics does not count
+  successful reviews as failed or assign them an `unknown` failure category.
 - Verify archived snapshot blobs against Git object IDs and restore transformed
   `export-subst` content so reviewers inspect the exact selected source bytes.
 - Validate structured reviewer reports locally before rendering: malformed

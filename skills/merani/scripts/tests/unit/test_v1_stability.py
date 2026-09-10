@@ -174,6 +174,36 @@ class V1StabilityTests(unittest.TestCase):
                 {"schema_version": 15, "provider_attempts": [receipt, receipt]}
             )
 
+    def test_interrupted_attempt_settlement_records_typed_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            MERANI.safe_write_json(
+                run_dir / "metadata.json",
+                {
+                    "schema_version": 15,
+                    "provider_attempts": [
+                        {
+                            "attempt_id": "attempt-interrupted",
+                            "provider": "claude",
+                            "state": "launched",
+                            "usage": None,
+                            "usage_status": "unknown",
+                            "outcome": "unknown",
+                        }
+                    ],
+                },
+            )
+            MERANI.settle_provider_attempt(
+                run_dir, "attempt-interrupted", outcome="interrupted"
+            )
+            receipt = MERANI.read_json(run_dir / "metadata.json")[
+                "provider_attempts"
+            ][0]
+
+        self.assertEqual(receipt["state"], "interrupted")
+        self.assertEqual(receipt["outcome"], "interrupted")
+        self.assertEqual(receipt["failure_category"], "interrupted")
+
     def test_definite_process_launch_failure_is_not_counted_as_provider_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)

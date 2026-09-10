@@ -881,6 +881,15 @@ def classify_provider_failure(
         )
     ):
         return "authentication"
+    if any(
+        marker in combined
+        for marker in (
+            "required mcp servers failed to initialize",
+            "failed to initialize session: required mcp",
+            "mcp error:",
+        )
+    ):
+        return "mcp_protocol"
     if any(marker in combined for marker in CODEX_NETWORK_FAILURE_MARKERS):
         return "network"
     direct_model_error = re.search(
@@ -3338,13 +3347,41 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                     },
                 }
             elif method == "ping":
-                if request.get("params") not in (None, {}):
-                    protocol_error(request_id, -32602, "ping params must be empty")
+                params = request.get("params")
+                if params is not None and (
+                    not isinstance(params, dict)
+                    or set(params) - {"_meta"}
+                    or (
+                        "_meta" in params
+                        and not isinstance(params.get("_meta"), dict)
+                    )
+                ):
+                    protocol_error(
+                        request_id,
+                        -32602,
+                        "ping params may contain only an object _meta field",
+                    )
                     continue
                 result = {}
             elif method == "tools/list":
-                if request.get("params") not in (None, {}):
-                    protocol_error(request_id, -32602, "tools/list params must be empty")
+                params = request.get("params")
+                if params is not None and (
+                    not isinstance(params, dict)
+                    or set(params) - {"cursor", "_meta"}
+                    or (
+                        params.get("cursor") is not None
+                        and not isinstance(params.get("cursor"), str)
+                    )
+                    or (
+                        "_meta" in params
+                        and not isinstance(params.get("_meta"), dict)
+                    )
+                ):
+                    protocol_error(
+                        request_id,
+                        -32602,
+                        "tools/list params must use optional cursor and object _meta fields",
+                    )
                     continue
                 result = {"tools": review_mcp_tool_definitions()}
             elif method == "tools/call":
@@ -3352,8 +3389,11 @@ def review_fs_mcp_command(arguments: Sequence[str]) -> int:
                 if not isinstance(params, dict):
                     protocol_error(request_id, -32602, "tools/call params must be an object")
                     continue
-                if set(params) - {"name", "arguments"}:
+                if set(params) - {"name", "arguments", "_meta"}:
                     protocol_error(request_id, -32602, "tools/call contains unsupported params")
+                    continue
+                if "_meta" in params and not isinstance(params.get("_meta"), dict):
+                    protocol_error(request_id, -32602, "tools/call _meta must be an object")
                     continue
                 name = params.get("name")
                 tool_arguments = params.get("arguments", {})
@@ -6192,7 +6232,11 @@ def analytics_report(since_days: int) -> dict[str, Any]:
         )
         if metadata.get("status") == "completed":
             contract_valid_runs += 1
-        failure = metadata.get("failure")
+        failure = (
+            metadata.get("failure")
+            if metadata.get("status") != "completed"
+            else None
+        )
         if isinstance(failure, dict):
             failure_type = str(failure.get("type") or "unknown")
             failure_types[failure_type] = failure_types.get(failure_type, 0) + 1
@@ -6240,7 +6284,15 @@ def analytics_report(since_days: int) -> dict[str, Any]:
                     "invalid_report"
                     if int(attempt.get("exit_code") or 0) == 0
                     and attempt.get("report_contract_valid") is False
-                    else str(attempt.get("failure_category") or "unknown")
+                    else str(
+                        attempt.get("failure_category")
+                        or (
+                            "interrupted"
+                            if attempt.get("outcome") == "interrupted"
+                            or attempt.get("state") == "interrupted"
+                            else "unknown"
+                        )
+                    )
                 )
                 provider_failure_categories[category] = (
                     provider_failure_categories.get(category, 0) + 1
@@ -10155,11 +10207,34 @@ def metadata_attempts_by_provider(
 ) -> list[tuple[str, dict[str, Any]]]:
     receipts = provider_attempt_receipts(metadata)
     if receipts:
-        return [
-            (str(item.get("provider") or "unknown"), item)
-            for item in receipts
-            if item.get("state") != "not_started"
-        ]
+        reviewers = metadata.get("reviewers")
+        projected_attempts = {
+            str(provider): reviewer_attempts(reviewer)
+            for provider, reviewer in (
+                reviewers.items() if isinstance(reviewers, dict) else ()
+            )
+            if isinstance(reviewer, dict)
+        }
+        projection_indexes: dict[str, int] = {}
+        result: list[tuple[str, dict[str, Any]]] = []
+        for receipt in receipts:
+            provider = str(receipt.get("provider") or "unknown")
+            projection_index = projection_indexes.get(provider, 0)
+            projections = projected_attempts.get(provider, [])
+            projection = (
+                projections[projection_index]
+                if projection_index < len(projections)
+                else {}
+            )
+            projection_indexes[provider] = projection_index + 1
+            if receipt.get("state") == "not_started":
+                continue
+            enriched = dict(receipt)
+            for field in ("report_contract_valid", "verdict"):
+                if field not in enriched and field in projection:
+                    enriched[field] = projection[field]
+            result.append((provider, enriched))
+        return result
     reviewers = metadata.get("reviewers")
     if not isinstance(reviewers, dict):
         return []
@@ -10334,6 +10409,7 @@ def settle_provider_attempt(
         else:
             target["outcome"] = outcome or "interrupted"
             target["usage_status"] = "unknown"
+            target["failure_category"] = outcome or "interrupted"
         if cancellation_already_recorded:
             target["state"] = "interrupted"
             target["outcome"] = "interrupted"
@@ -10873,6 +10949,9 @@ def persist_review_results(
             "provider_attempts", metadata.get("provider_attempts", [])
         )
         persisted_metadata.update(metadata)
+        if failure is None:
+            persisted_metadata.pop("failure", None)
+            persisted_metadata.pop("terminal_error", None)
         persisted_metadata["provider_attempts"] = persisted_attempts
         safe_write_json(metadata_path, persisted_metadata)
         metadata.clear()
