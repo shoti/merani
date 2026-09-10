@@ -1693,7 +1693,15 @@ class RunnerUnitTests(unittest.TestCase):
                     "method": "initialize",
                     "params": {"protocolVersion": "2025-06-18"},
                 },
-                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {
+                        "cursor": None,
+                        "_meta": {"progressToken": "list-tools"},
+                    },
+                },
                 {
                     "jsonrpc": "2.0",
                     "id": 3,
@@ -1701,7 +1709,14 @@ class RunnerUnitTests(unittest.TestCase):
                     "params": {
                         "name": "read_file",
                         "arguments": {"path": "visible.txt"},
+                        "_meta": {"progressToken": 3},
                     },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "ping",
+                    "params": {"_meta": {"progressToken": 4}},
                 },
             ]
             completed = subprocess.run(
@@ -1730,6 +1745,7 @@ class RunnerUnitTests(unittest.TestCase):
             "verified text",
             responses[2]["result"]["content"][0]["text"],
         )
+        self.assertEqual(responses[3]["result"], {})
 
     def test_codex_api_key_authentication_is_rejected(self) -> None:
         args = MM.build_parser().parse_args(
@@ -6345,6 +6361,18 @@ None.
         )
         self.assertEqual(unrelated, "provider_error")
 
+    def test_provider_failure_classifies_mcp_initialization_errors(self) -> None:
+        category = MM.classify_provider_failure(
+            returncode=1,
+            timed_out=False,
+            stdout="",
+            stderr=(
+                "Failed to create session: required MCP servers failed to "
+                "initialize: review_files: Mcp error: -32602"
+            ),
+        )
+        self.assertEqual(category, "mcp_protocol")
+
     def test_claude_structured_output_is_rendered_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -8102,6 +8130,84 @@ None.
         ):
             report = MM.analytics_report(7)
         self.assertEqual(report["run_statuses"]["preflight_blocked"], 1)
+
+    def test_analytics_reconciles_durable_receipts_with_report_results(self) -> None:
+        now = MM.utc_now()
+        run_dir = Path("/tmp/durable-receipts")
+        metadata = {
+            "created_at": now,
+            "status": "completed",
+            "workflow_id": "wf-durable-receipts",
+            "failure": {
+                "type": "reviewer_failure",
+                "reviewers": ["claude"],
+                "successful_reviewers": [],
+            },
+            "provider_attempts": [
+                {
+                    "attempt_id": "attempt-failed",
+                    "provider": "claude",
+                    "state": "completed",
+                    "outcome": "failed",
+                    "exit_code": 1,
+                    "failure_category": "budget_exhausted",
+                    "usage": None,
+                    "usage_status": "unknown",
+                },
+                {
+                    "attempt_id": "attempt-returned",
+                    "provider": "claude",
+                    "state": "completed",
+                    "outcome": "returned",
+                    "exit_code": 0,
+                    "failure_category": None,
+                    "usage": None,
+                    "usage_status": "unknown",
+                },
+                {
+                    "attempt_id": "attempt-interrupted",
+                    "provider": "claude",
+                    "state": "interrupted",
+                    "outcome": "interrupted",
+                    "usage": None,
+                    "usage_status": "unknown",
+                },
+            ],
+            "reviewers": {
+                "claude": {
+                    "attempts": [
+                        {
+                            "exit_code": 1,
+                            "report_contract_valid": False,
+                            "verdict": "UNKNOWN",
+                        }
+                    ],
+                    "exit_code": 0,
+                    "report_contract_valid": True,
+                    "verdict": "PASS_CLEAN",
+                }
+            },
+        }
+        with (
+            mock.patch.object(
+                MM, "all_run_metadata", return_value=[(run_dir, metadata)]
+            ),
+            mock.patch.object(MM, "workflow_path", return_value=Path("/missing")),
+            mock.patch.object(MM, "WORKFLOWS_DIR", Path("/missing")),
+        ):
+            report = MM.analytics_report(7)
+
+        self.assertEqual(report["providers"]["claude"]["successful"], 1)
+        self.assertEqual(report["providers"]["claude"]["failed"], 2)
+        self.assertEqual(
+            report["provider_failure_categories"],
+            {"budget_exhausted": 1, "interrupted": 1},
+        )
+        self.assertEqual(
+            report["metrics"]["successful_reviewer_invocations"], 1
+        )
+        self.assertEqual(report["partial_runs"], 0)
+        self.assertEqual(report["failure_types"], {})
 
     def test_preflight_blocks_are_not_counted_as_failed_reviews(self) -> None:
         run_dir = Path("/tmp/preflight-block")
@@ -11647,6 +11753,8 @@ class RunnerEndToEndTests(unittest.TestCase):
             )
             resumed = MM.read_json(partial_dir / "metadata.json")
             self.assertEqual(resumed["status"], "completed")
+            self.assertNotIn("failure", resumed)
+            self.assertNotIn("terminal_error", resumed)
             self.assertEqual(resumed["resumed_reviewers"], ["kimi"])
             self.assertEqual(len(MM.reviewer_attempts(resumed["reviewers"]["claude"])), 1)
             self.assertEqual(len(MM.reviewer_attempts(resumed["reviewers"]["kimi"])), 2)
