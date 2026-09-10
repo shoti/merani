@@ -32,6 +32,7 @@ MM = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MM
 SPEC.loader.exec_module(MM)
 import merani_core.adapters.evidence_memory as EM
+import merani_core.adapters.external_auth as EA
 import merani_core.domain.assurance as AM
 import merani_core.domain.review_contract as RC
 from tests.unit.test_architecture import ArchitectureTests
@@ -92,6 +93,42 @@ def initialize_repo(root: Path) -> None:
     (root / "unrelated.txt").write_text("clean\n", encoding="utf-8")
     run(["git", "add", "src/feature.py", "unrelated.txt"], cwd=root)
     run(["git", "commit", "-qm", "initial"], cwd=root)
+
+
+def install_codex_readiness_fixture(bin_dir: Path, home: Path) -> None:
+    """Install a non-invokable Codex shim for Claude fallback preflight."""
+    fake_codex = bin_dir / "codex"
+    fake_codex.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+            args = sys.argv[1:]
+            if args == ["--version"]:
+                print("codex-cli 0.148.0")
+                raise SystemExit(0)
+            if args == ["--help"]:
+                print("--ask-for-approval")
+                raise SystemExit(0)
+            if args == ["exec", "--help"]:
+                print("--config --disable --ephemeral --ignore-rules --json --output-schema --profile --skip-git-repo-check --strict-config")
+                raise SystemExit(0)
+            if args == ["login", "status"]:
+                print("Logged in using ChatGPT")
+                raise SystemExit(0)
+            print("Codex readiness fixture must not be invoked", file=sys.stderr)
+            raise SystemExit(97)
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        '{"auth_mode":"synthetic-chatgpt"}\n', encoding="utf-8"
+    )
+    (codex_home / "auth.json").chmod(0o600)
 
 
 def initialize_assurance_artifacts(
@@ -2172,6 +2209,7 @@ class RunnerUnitTests(unittest.TestCase):
     def test_plain_doctor_does_not_probe_disabled_codex_cli(self) -> None:
         config = json.loads(json.dumps(MM.DEFAULT_CONFIG))
         config["codex"]["enabled"] = False
+        config["claude"]["enabled"] = False
         output = io.StringIO()
         with (
             mock.patch.object(MM, "load_config", return_value=config),
@@ -2211,6 +2249,141 @@ class RunnerUnitTests(unittest.TestCase):
         )
         self.assertIsNone(check["ok"])
         self.assertIn("not probed", check["detail"])
+
+    def test_doctor_requires_codex_as_claude_quota_standby(self) -> None:
+        config = json.loads(json.dumps(MM.DEFAULT_CONFIG))
+        config["codex"]["enabled"] = False
+        output = io.StringIO()
+        readiness_calls: list[str] = []
+
+        def readiness(
+            provider: str, _model: str | None = None
+        ) -> MM.ProviderReadiness:
+            readiness_calls.append(provider)
+            return MM.ProviderReadiness(True, "ready")
+
+        with (
+            mock.patch.object(MM, "load_config", return_value=config),
+            mock.patch.object(
+                MM, "plugin_install_parity", return_value=(True, "cache matches")
+            ),
+            mock.patch.object(
+                MM, "private_storage_permissions", return_value=(True, "private")
+            ),
+            mock.patch.object(
+                MM, "claude_cli_contract", return_value=(True, "ready")
+            ),
+            mock.patch.object(
+                MM, "codex_cli_contract", return_value=(True, "ready")
+            ) as codex_contract,
+            mock.patch.object(MM, "provider_readiness", side_effect=readiness),
+            redirect_stdout(output),
+        ):
+            exit_code = MM.doctor_command(
+                MM.build_parser().parse_args(["doctor"])
+            )
+
+        self.assertEqual(exit_code, 0)
+        codex_contract.assert_called_once_with()
+        self.assertEqual(readiness_calls, ["claude", "codex"])
+        codex = next(
+            item
+            for item in json.loads(output.getvalue())["checks"]
+            if item["name"] == "codex_static_readiness"
+        )
+        self.assertTrue(codex["required"])
+        self.assertEqual(codex["role"], "claude_quota_fallback")
+
+    def test_doctor_required_external_authentication_is_gate_blocking(self) -> None:
+        config = json.loads(json.dumps(MM.DEFAULT_CONFIG))
+        config["claude"]["enabled"] = False
+        config["codex"]["enabled"] = False
+        output = io.StringIO()
+        args = MM.build_parser().parse_args(
+            [
+                "doctor",
+                "--require-github",
+                "--gcp-configuration",
+                "re2",
+                "--gcp-account",
+                "user@example.invalid",
+                "--gcp-project",
+                "project-one",
+            ]
+        )
+        with (
+            mock.patch.object(MM, "load_config", return_value=config),
+            mock.patch.object(
+                MM, "plugin_install_parity", return_value=(True, "cache matches")
+            ),
+            mock.patch.object(
+                MM, "private_storage_permissions", return_value=(True, "private")
+            ),
+            mock.patch.object(
+                MM, "claude_cli_contract", return_value=(True, "not required")
+            ),
+            mock.patch.object(
+                MM,
+                "github_auth_readiness",
+                return_value=MM.ProviderReadiness(False, "run gh auth login"),
+            ),
+            mock.patch.object(
+                MM,
+                "gcp_auth_readiness",
+                return_value=MM.ProviderReadiness(True, "gcloud ready"),
+            ) as gcp,
+            redirect_stdout(output),
+        ):
+            exit_code = MM.doctor_command(args)
+
+        self.assertEqual(exit_code, 3)
+        gcp.assert_called_once_with("re2", "user@example.invalid", "project-one")
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ready"])
+        self.assertFalse(
+            next(
+                item
+                for item in payload["checks"]
+                if item["name"] == "github_authentication"
+            )["ok"]
+        )
+
+    def test_gcp_auth_readiness_pins_identity_and_hides_access_token(self) -> None:
+        completed = [
+            subprocess.CompletedProcess([], 0, "re2\nslow\n", ""),
+            subprocess.CompletedProcess([], 0, "user@example.invalid\n", ""),
+            subprocess.CompletedProcess([], 0, "project-one\n", ""),
+            subprocess.CompletedProcess([], 0, None, ""),
+        ]
+        with (
+            mock.patch.object(EA.shutil, "which", return_value="/fake/gcloud"),
+            mock.patch.object(EA.subprocess, "run", side_effect=completed) as run,
+        ):
+            readiness = MM.gcp_auth_readiness(
+                "re2", "user@example.invalid", "project-one"
+            )
+
+        self.assertTrue(readiness.ready)
+        token_call = run.call_args_list[-1]
+        self.assertEqual(
+            token_call.args[0],
+            [
+                "gcloud",
+                "--configuration=re2",
+                "--project=project-one",
+                "auth",
+                "print-access-token",
+                "--account=user@example.invalid",
+            ],
+        )
+        self.assertIs(token_call.kwargs["stdout"], subprocess.DEVNULL)
+
+    def test_doctor_rejects_partial_gcp_identity_arguments(self) -> None:
+        args = MM.build_parser().parse_args(
+            ["doctor", "--gcp-configuration", "re2"]
+        )
+        with self.assertRaisesRegex(MM.ReviewError, "must be supplied together"):
+            MM.dispatch_cli_command(args, {"doctor": mock.Mock(return_value=0)})
 
     def test_plugin_parity_accepts_non_personal_marketplace_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2675,7 +2848,10 @@ class RunnerUnitTests(unittest.TestCase):
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch.object(MM.subprocess, "run", side_effect=OSError("missing")),
         ):
-            self.assertEqual(MM.claude_authentication_mode()[0], "unknown")
+            self.assertEqual(
+                MM.claude_authentication_mode(),
+                ("unknown", "authentication mode could not be inspected", False),
+            )
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch.object(
@@ -2684,7 +2860,10 @@ class RunnerUnitTests(unittest.TestCase):
                 side_effect=subprocess.TimeoutExpired(["claude"], 10),
             ),
         ):
-            self.assertEqual(MM.claude_authentication_mode()[0], "unknown")
+            self.assertEqual(
+                MM.claude_authentication_mode(),
+                ("unknown", "authentication mode could not be inspected", False),
+            )
         invalid = subprocess.CompletedProcess(
             ["claude", "auth", "status"],
             0,
@@ -2695,7 +2874,14 @@ class RunnerUnitTests(unittest.TestCase):
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch.object(MM.subprocess, "run", return_value=invalid),
         ):
-            self.assertEqual(MM.claude_authentication_mode()[0], "unknown")
+            self.assertEqual(
+                MM.claude_authentication_mode(),
+                (
+                    "unknown",
+                    "authentication status could not be confirmed",
+                    False,
+                ),
+            )
 
     def test_claude_authentication_mode_scopes_sandbox_logout(self) -> None:
         logged_out = subprocess.CompletedProcess(
@@ -11001,6 +11187,38 @@ class RunnerEndToEndTests(unittest.TestCase):
             self.assertEqual(metadata["status"], "preflight_blocked")
             self.assertEqual(metadata.get("provider_attempts"), None)
 
+    def test_claude_run_requires_authenticated_codex_quota_standby(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            harness.environment["MM_FAKE_CODEX_LOGGED_OUT"] = "1"
+            harness.queue("claude", {"report": structured_report()})
+            workflow = harness.cli(repo, "workflow", "start").stdout.strip()
+
+            blocked = harness.cli(
+                repo,
+                "run",
+                "--workflow-id",
+                workflow,
+                "--uncommitted",
+                "--required-check",
+                PASSED_CHECK["name"],
+                check=False,
+                provider_backed=True,
+            )
+
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("automatic quota fallback", blocked.stderr)
+            self.assertIn("codex login", blocked.stderr)
+            self.assertEqual(harness.invocations(), [])
+            metadata = MM.read_json(harness.run_directories()[0] / "metadata.json")
+            self.assertEqual(metadata["status"], "preflight_blocked")
+            self.assertIsNone(metadata.get("provider_attempts"))
+
     def test_check_plan_and_informational_observations_through_final_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -11157,7 +11375,7 @@ class RunnerEndToEndTests(unittest.TestCase):
                 )
                 self.assertFalse((run_dir / "final.json").exists())
 
-    def test_expired_claude_oauth_allows_explicit_codex_substitution(self) -> None:
+    def test_expired_claude_oauth_requires_reauthentication(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = root / "repo"
@@ -11181,16 +11399,20 @@ class RunnerEndToEndTests(unittest.TestCase):
                 before["reviewers"]["claude"]["failure_category"], "authentication"
             )
             harness.queue("codex", {"structured": structured_payload()})
-            harness.cli(
+            substitution = harness.cli(
                 repo, "resume", "--run", str(run_dir),
-                "--replace-failed-claude-with-codex", provider_backed=True,
+                "--replace-failed-claude-with-codex",
+                check=False,
+                provider_backed=True,
             )
+            self.assertNotEqual(substitution.returncode, 0)
+            self.assertIn("require re-authentication", substitution.stderr)
             after = MM.read_json(run_dir / "metadata.json")
-            self.assertEqual(after["status"], "completed")
+            self.assertEqual(after["status"], "failed")
             self.assertEqual(after["source_fingerprint"], before["source_fingerprint"])
-            self.assertEqual(after["provider_substitutions"][0]["reason"], "authentication")
+            self.assertNotIn("provider_substitutions", after)
             self.assertEqual(
-                [item["provider"] for item in harness.invocations()], ["claude", "codex"]
+                [item["provider"] for item in harness.invocations()], ["claude"]
             )
 
     def test_invalid_structured_provider_reports_cannot_finalize(self) -> None:
@@ -11431,7 +11653,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             self.assertEqual(stale.returncode, 3)
             self.assertFalse(json.loads(stale.stdout)["source_fresh"])
 
-    def test_failed_claude_can_be_replaced_by_codex_on_same_snapshot(self) -> None:
+    def test_claude_quota_automatically_falls_back_to_codex_on_same_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = root / "codex-fallback-repo"
@@ -11461,7 +11683,8 @@ class RunnerEndToEndTests(unittest.TestCase):
                     "exit_code": 1,
                 },
             )
-            failed = harness.cli(
+            harness.queue("codex", {"structured": structured_payload()})
+            completed = harness.cli(
                 repo,
                 "run", "--required-check", PASSED_CHECK["name"],
                 "--uncommitted",
@@ -11480,22 +11703,9 @@ class RunnerEndToEndTests(unittest.TestCase):
                 check=False,
                 provider_backed=True,
             )
-            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn("automatically switching", completed.stdout)
             run_dir = harness.run_directories()[0]
-            before = MM.read_json(run_dir / "metadata.json")
-            self.assertEqual(before["reviewers"]["claude"]["failure_category"], "quota")
-
-            harness.queue("codex", {"structured": structured_payload()})
-            resumed = harness.cli(
-                repo,
-                "resume",
-                "--run",
-                str(run_dir),
-                "--replace-failed-claude-with-codex",
-                provider_backed=True,
-            )
-
-            self.assertEqual(resumed.returncode, 0)
             after = MM.read_json(run_dir / "metadata.json")
             self.assertEqual(after["status"], "completed")
             self.assertEqual(
@@ -11513,9 +11723,12 @@ class RunnerEndToEndTests(unittest.TestCase):
             self.assertEqual(
                 after["provider_substitutions"][0]["reason"], "quota"
             )
+            self.assertTrue(
+                after["provider_substitutions"][0]["automatic"]
+            )
             self.assertEqual(
-                after["review_snapshot_fingerprint"],
-                before["review_snapshot_fingerprint"],
+                after["review_policy"]["automatic_claude_quota_fallback_provider"],
+                "codex",
             )
             summary = MM.read_json(run_dir / "review-summary.json")
             self.assertEqual(set(summary["reviews"]), {"codex"})
@@ -11538,6 +11751,129 @@ class RunnerEndToEndTests(unittest.TestCase):
                 '":root" = "deny"', str(invocations[1]["codex_profile"])
             )
             self.assertFalse(invocations[1]["sentinel_secret_present"])
+
+    def test_claude_quota_on_resume_also_automatically_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "resume-fallback-repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            workflow = harness.cli(
+                repo,
+                "workflow",
+                "start",
+                "--review-mode",
+                "balanced",
+                "--max-provider-attempts",
+                "6",
+            ).stdout.strip()
+            harness.queue(
+                "claude",
+                {
+                    "kind": "failure",
+                    "stderr": "temporary provider failure",
+                    "exit_code": 1,
+                },
+            )
+            failed = harness.cli(
+                repo,
+                "run",
+                "--workflow-id",
+                workflow,
+                "--uncommitted",
+                "--required-check",
+                PASSED_CHECK["name"],
+                check=False,
+                provider_backed=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            run_dir = harness.run_directories()[0]
+
+            harness.queue(
+                "claude",
+                {
+                    "kind": "failure",
+                    "stderr": "usage limit reached; resets tomorrow",
+                    "exit_code": 1,
+                },
+            )
+            harness.queue("codex", {"structured": structured_payload()})
+            resumed = harness.cli(
+                repo,
+                "resume",
+                "--run",
+                str(run_dir),
+                check=False,
+                provider_backed=True,
+            )
+
+            self.assertEqual(resumed.returncode, 0)
+            self.assertIn("automatically switching", resumed.stdout)
+            metadata = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(metadata["status"], "completed")
+            self.assertTrue(metadata["provider_substitutions"][0]["automatic"])
+            self.assertEqual(
+                [item["provider"] for item in harness.invocations()],
+                ["claude", "claude", "codex"],
+            )
+
+    def test_successful_primary_codex_satisfies_claude_quota_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "parallel-fallback-repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            (repo / "src/feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+            harness = FakeProviderHarness(root)
+            workflow = harness.cli(
+                repo,
+                "workflow",
+                "start",
+                "--review-mode",
+                "balanced",
+                "--max-provider-attempts",
+                "6",
+            ).stdout.strip()
+            harness.queue(
+                "claude",
+                {
+                    "kind": "failure",
+                    "stderr": "usage limit reached; resets tomorrow",
+                    "exit_code": 1,
+                },
+            )
+            harness.queue("codex", {"structured": structured_payload()})
+
+            completed = harness.cli(
+                repo,
+                "run",
+                "--workflow-id",
+                workflow,
+                "--uncommitted",
+                "--required-check",
+                PASSED_CHECK["name"],
+                "--with-claude",
+                "--with-codex",
+                "--without-antigravity",
+                "--without-kimi",
+                check=False,
+                provider_backed=True,
+            )
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn("successful Codex review", completed.stdout)
+            run_dir = harness.run_directories()[0]
+            metadata = MM.read_json(run_dir / "metadata.json")
+            self.assertEqual(metadata["status"], "completed")
+            substitution = metadata["provider_substitutions"][0]
+            self.assertTrue(substitution["automatic"])
+            self.assertTrue(substitution["reused_existing_report"])
+            self.assertCountEqual(
+                [item["provider"] for item in harness.invocations()],
+                ["claude", "codex"],
+            )
 
     def test_last_chance_budget_guard_blocks_without_consuming_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -13516,6 +13852,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text("VALUE = 2\n", encoding="utf-8")
             fake_claude = bin_dir / "claude"
@@ -13696,6 +14033,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text("VALUE = 2\n", encoding="utf-8")
             run(["git", "add", "src/feature.py"], cwd=repo)
@@ -13710,6 +14048,10 @@ class RunnerEndToEndTests(unittest.TestCase):
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
                       echo "2.1.263 (Claude Code fixture)"
+                      exit 0
+                    fi
+                    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+                      echo '{"loggedIn":true,"authMethod":"oauth"}'
                       exit 0
                     fi
                     test "$(cat unrelated.txt)" = "clean" || exit 3
@@ -13769,6 +14111,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             base = run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
             (repo / "src" / "feature.py").write_text(
@@ -13799,6 +14142,10 @@ class RunnerEndToEndTests(unittest.TestCase):
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
                       echo "2.1.263 (Claude Code fixture)"
+                      exit 0
+                    fi
+                    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+                      echo '{"loggedIn":true,"authMethod":"oauth"}'
                       exit 0
                     fi
                     test "$(cat src/feature.py)" = "VALUE = 1" || exit 3
@@ -13871,6 +14218,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "secret-fixture.py").write_text(
                 'apiKey = "credential-value-123456"\n', encoding="utf-8"
@@ -13974,6 +14322,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text(
                 "VALUE = 2\n", encoding="utf-8"
@@ -13986,6 +14335,10 @@ class RunnerEndToEndTests(unittest.TestCase):
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
                       echo "2.1.263 (Claude Code fixture)"
+                      exit 0
+                    fi
+                    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+                      echo '{"loggedIn":true,"authMethod":"oauth"}'
                       exit 0
                     fi
                     cat >/dev/null
@@ -14078,6 +14431,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text("VALUE = 2\n", encoding="utf-8")
             (repo / "unrelated.txt").write_text("dirty\n", encoding="utf-8")
@@ -14089,6 +14443,10 @@ class RunnerEndToEndTests(unittest.TestCase):
                     #!/bin/sh
                     if [ "$1" = "--version" ]; then
                       echo "2.1.263 (Claude Code fixture)"
+                      exit 0
+                    fi
+                    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+                      echo '{"loggedIn":true,"authMethod":"oauth"}'
                       exit 0
                     fi
                     cat >/dev/null
@@ -14507,6 +14865,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text(
                 "VALUE = 2\n", encoding="utf-8"
@@ -14640,6 +14999,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             (repo / "src" / "feature.py").write_text(
                 "VALUE = 2\n", encoding="utf-8"
@@ -14817,6 +15177,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             fixture = repo / "credential-fixture.py"
             approved_content = "api" + 'Key = "credential-value-123456"\n'
@@ -14981,6 +15342,7 @@ class RunnerEndToEndTests(unittest.TestCase):
             home.mkdir()
             repo.mkdir()
             bin_dir.mkdir()
+            install_codex_readiness_fixture(bin_dir, home)
             initialize_repo(repo)
             npmrc = repo / ".npmrc"
             npmrc.write_text(

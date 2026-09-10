@@ -20,8 +20,10 @@ def interpret_auth_status(
 ) -> tuple[str, str, bool]:
     """Return redacted billing mode, detail, and launch permission.
 
-    Definite logged-out JSON blocks even on a nonzero exit. Unknown or
-    unavailable status remains permitted for compatibility with older CLIs.
+    A positive authentication result is required before a review starts.
+    Definite logout, unavailable status, and unparseable output all block so
+    the controller can ask the user to re-authenticate before consuming an
+    attempt.
     """
     if api_key_present:
         return (
@@ -30,7 +32,7 @@ def interpret_auth_status(
             True,
         )
     if returncode is None:
-        return "unknown", "authentication mode could not be inspected", True
+        return "unknown", "authentication mode could not be inspected", False
     raw = (stdout or "").strip()
     try:
         payload = json.loads(raw)
@@ -53,7 +55,7 @@ def interpret_auth_status(
             False,
         )
     if returncode != 0:
-        return "unknown", "authentication status is unavailable", True
+        return "unknown", "authentication status is unavailable", False
     searchable = json.dumps(payload, sort_keys=True).lower() if payload else raw.lower()
     if any(marker in searchable for marker in ("api_key", "apikey", "console", "anthropic console")):
         return "api_billed", "Claude Console or API-key authentication", True
@@ -61,7 +63,7 @@ def interpret_auth_status(
         return "subscription", "Claude subscription authentication", True
     if isinstance(payload, dict) and payload.get("loggedIn") is True:
         return "unknown", "authenticated; billing mode was not reported", True
-    return "unknown", "authentication status could not be confirmed", True
+    return "unknown", "authentication status could not be confirmed", False
 
 
 def build(

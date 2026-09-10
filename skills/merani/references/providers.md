@@ -14,9 +14,11 @@ existing explicit pins unless the user requests changing them.
 
 ## Control reviewers
 
-Claude is enabled by default. Codex, Antigravity, and Kimi remain disabled until
-explicitly enabled, which avoids accidental allowance consumption or quota
-retries. Use the
+Claude is enabled by default. Codex, Antigravity, and Kimi remain disabled as
+primary reviewers until explicitly enabled, which avoids accidental parallel
+allowance consumption or quota retries. A ready Codex CLI is nevertheless
+required as the automatic standby for a Claude-only review. It is invoked only
+after Claude returns a typed subscription usage-limit failure. Use the
 bundled runner so the plugin remains self-contained:
 
 ```bash
@@ -118,9 +120,9 @@ default-provider contract actionably. Definite `loggedIn: false` on the host
 still blocks before launch. The same result inside the Codex sandbox is labeled
 `boundary_unavailable`, because it cannot establish the host session's state;
 Merani must be run from the authenticated host boundary. An unavailable or
-unparseable status stays labeled `unknown` and is never reported as verified
-login. `doctor` includes its execution boundary so these observations are not
-silently generalized to another boundary.
+unparseable status stays labeled `unknown`, blocks review admission, and is
+never reported as verified login. `doctor` includes its execution boundary so
+these observations are not silently generalized to another boundary.
 On macOS, the filtered Claude process retains `USER` because the CLI uses it to
 resolve the authenticated account. Removing it makes an authenticated host
 session appear logged out; Merani still removes unrelated credential variables.
@@ -141,15 +143,19 @@ Prefer `k3-256k` for routine Kimi reviews and `k3` when the relevant context
 cannot fit within 256K. State explicitly which reviewers actually ran.
 
 When the optional `merani` PATH shortcut exists, it is equivalent to the
-bundled Python command. Run `doctor` before the first review in a session when
-CLI availability or model configuration is uncertain. It checks plugin/cache
-parity, private storage modes, CLI flags, and static readiness; `doctor --live`
-adds a tiny Claude probe capped at $0.10 and probes any other enabled provider.
-Claude's non-billable auth status is checked before launch and resume. A
-definite `loggedIn: false` blocks before a provider attempt is reserved or
-started, including when the status command exits nonzero. An unavailable or
-unparseable status remains `unknown` for compatibility; it is not evidence of
-a working login.
+bundled Python command. Run `doctor` before the first review in every session.
+It checks plugin/cache parity, private storage modes, CLI flags, the enabled
+reviewers, and the Codex quota-fallback standby. Add `--require-github` when the
+task requires GitHub CLI access. GCP tasks must pass their exact
+`--gcp-configuration`, `--gcp-account`, and `--gcp-project`; Merani validates
+the configured identity and obtains a token with stdout discarded. These
+external checks are never inferred for tasks that do not need them.
+`doctor --live` adds a tiny Claude probe capped at $0.10 and probes any other
+enabled primary provider. Claude's non-billable auth status is checked before
+launch and resume. Definite logout, unavailable status, or unparseable status
+blocks before a provider attempt is reserved or started. Ask the user to
+re-authenticate in the same execution boundary and rerun `doctor`; do not
+substitute Codex for an authentication problem.
 Inspect the reported runtime plugin version, root, runner path, and SHA-256.
 Artifacts persist the same identity. During local plugin development, invoke
 the intended source runner directly; a cached runner can prove parity only for

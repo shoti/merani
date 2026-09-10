@@ -39,8 +39,10 @@ changed finding still requires a new one-shot scan token.
 
 ## Failed reviewers and allowance
 
-When Claude reports an authentication failure, run `claude auth status` in the
-same execution boundary before retrying. A `loggedIn: false` result inside the
+When Claude reports an authentication failure, do not substitute another
+reviewer. Run `claude auth status` in the same execution boundary before
+retrying, ask the user to re-authenticate, and rerun `merani doctor`. A
+`loggedIn: false` result inside the
 Codex sandbox is recorded as `boundary_unavailable`: it does not claim that the
 host Claude session is logged out. Run Merani from the authenticated host
 boundary instead. A definite host logout and a boundary-unavailable preflight
@@ -80,22 +82,27 @@ merani resume --run <partial-run-dir> \
   --claude-max-budget-usd 2 --claude-effort medium
 ```
 
-When Claude instead has a typed quota, authentication, or budget-stop failure,
-the user may explicitly replace only that failed attempt with a fresh Codex
-session against the same fingerprint-bound snapshot, provided Codex has not
-already succeeded in that run:
+When Claude reaches a typed subscription quota/usage limit, Merani
+automatically replaces only that failed attempt with its preflighted Codex
+standby against the same fingerprint-bound snapshot. If Codex already succeeded
+as a primary reviewer on that snapshot, Merani reuses that report instead of
+consuming another Codex attempt. No additional user confirmation is required.
+For a typed per-review budget stop, the user may still explicitly request the
+same substitution:
 
 ```bash
 merani resume --run <partial-run-dir> \
   --replace-failed-claude-with-codex
 ```
 
-The run preserves Claude's failed attempt and records the substitution. Report
-the successful Codex review as fresh-session, same-provider-family coverage;
-never describe it as an independent external-model review.
+The run preserves Claude's failed attempt and records whether the substitution
+was automatic. Report the successful Codex review as fresh-session,
+same-provider-family coverage; never describe it as an independent
+external-model review. Authentication failures are ineligible for substitution.
 
-If Codex already succeeded, preserve its report, restore Claude readiness, and
-use ordinary `resume`. If Claude remains unavailable, report the blocked review.
+For non-quota Claude failures, preserve any successful Codex report.
+Authentication failures still require restoring Claude readiness before an
+ordinary `resume`; if Claude remains unavailable, report the blocked review.
 
 The provider-attempt ceiling still applies. A linked successor inherits every
 ancestor's successful and failed provider attempts, so supersession cannot reset

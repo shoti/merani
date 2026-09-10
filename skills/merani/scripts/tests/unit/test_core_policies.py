@@ -190,12 +190,12 @@ class CorePolicyTests(unittest.TestCase):
         self.assertIn("host Claude session may still be authenticated", detail)
         self.assertNotIn("Claude is not logged in", detail)
 
-    def test_claude_unknown_auth_status_remains_permitted(self) -> None:
+    def test_claude_unknown_auth_status_blocks_before_launch(self) -> None:
         self.assertEqual(
             claude.interpret_auth_status(
                 api_key_present=False, returncode=1, stdout="unavailable"
             ),
-            ("unknown", "authentication status is unavailable", True),
+            ("unknown", "authentication status is unavailable", False),
         )
 
     def test_codex_decoder_rejects_unfinished_stream(self) -> None:
