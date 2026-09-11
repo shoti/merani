@@ -16,6 +16,9 @@ source-staleness detection, and required evidence plus final plan critiques
 through the shared provider executor. Contract tests reject wrong schema types,
 cycles, dangling references, unsafe paths, packet bounds, and tampering.
 Automated tests never call a paid provider or external service.
+CI runs the full suite on Linux with Python 3.12 and 3.13. Maintainers verify
+macOS compatibility locally before handoff when a change affects platform
+behavior; the package remains supported on both operating systems.
 The child environment is constructed from an allowlist and has no provider
 credentials, SSH agent, credential helper, host hooks, proxy, canonical config,
 or legacy Merani override. Output streams, provider output, fixture size,

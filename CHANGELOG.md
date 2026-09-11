@@ -10,6 +10,8 @@
   freshness verification, supersession, and recovery.
 - Reuse the protected provider executor through purpose-specific schemas while
   preserving existing code-review defaults and artifacts.
+- Run the hosted CI matrix on Linux with Python 3.12 and 3.13; retain macOS as
+  a supported platform verified during local release handoff.
 
 - Add a reusable offline external-Git campaign with isolated fake providers,
   replayable evidence and bounded performance profiles. Generate private,

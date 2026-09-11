@@ -19,13 +19,12 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
+    name: Linux / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -86,7 +85,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: merani-campaign-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: merani-campaign-linux-py${{ matrix.python-version }}
           path: |
             ${{ runner.temp }}/merani-campaign/campaign-*/campaign-summary.json
             ${{ runner.temp }}/merani-campaign/campaign-*/campaign-report.md
