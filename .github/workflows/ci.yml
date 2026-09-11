@@ -6,6 +6,7 @@ on:
       - "main"
       - "shoti/merani-v1-stability-*"
       - "shoti/merani-testing-feedback-*"
+      - "shoti/merani-planning-*"
   pull_request:
   workflow_dispatch:
 
@@ -48,6 +49,10 @@ jobs:
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
           python -m json.tool skills/merani/references/reflection.schema.json >/dev/null
           python -m json.tool skills/merani/references/campaign-record.schema.json >/dev/null
+          python -m json.tool skills/merani-plan/references/planning-artifacts.schema.json >/dev/null
+          for file in skills/merani-plan/references/*.json skills/merani-plan/references/fixtures/*.json; do
+            python -m json.tool "$file" >/dev/null
+          done
           for file in skills/merani/scripts/fixtures/*.json; do
             python -m json.tool "$file" >/dev/null
           done

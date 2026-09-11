@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Add the `$merani-plan` skill and `merani plan` CLI for clean-checkout,
+  evidence-backed implementation planning with immutable context and evidence,
+  structured Claude/Codex critiques, deterministic Markdown, guarded export,
+  freshness verification, supersession, and recovery.
+- Reuse the protected provider executor through purpose-specific schemas while
+  preserving existing code-review defaults and artifacts.
+
 - Add a reusable offline external-Git campaign with isolated fake providers,
   replayable evidence and bounded performance profiles. Generate private,
   evidence-bound post-run reflections without provider calls or gate authority.

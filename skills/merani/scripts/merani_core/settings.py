@@ -49,6 +49,7 @@ class RuntimePaths:
     config_path: Path
     provider_health_path: Path
     runs_dir: Path
+    plans_dir: Path
     workflows_dir: Path
     sensitive_scans_dir: Path
     kimi_agent_path: Path
@@ -86,6 +87,11 @@ class RuntimePaths:
             home_dir / ".codex" / "review-runs",
             legacy_name="MM_REVIEW_RUNS_DIR",
         )
+        plans_dir = _state_dir(
+            values,
+            "MERANI_PLANS_DIR",
+            home_dir / ".codex" / "merani-plans",
+        )
         agent_name = "merani-read-only-v1"
         return cls(
             launcher_path=launcher,
@@ -95,6 +101,7 @@ class RuntimePaths:
             config_path=config_dir / "config.json",
             provider_health_path=config_dir / "provider-health.json",
             runs_dir=runs_dir,
+            plans_dir=plans_dir,
             workflows_dir=runs_dir / "workflows",
             sensitive_scans_dir=runs_dir / "sensitive-scans",
             kimi_agent_path=skill_dir / "references" / "kimi-reviewer.md",

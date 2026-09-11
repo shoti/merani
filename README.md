@@ -1,6 +1,6 @@
 # Merani
 
-A second code review for Codex, with a record of what was checked.
+Evidence-backed implementation planning and a second code review for Codex.
 
 AI reviewers can miss bugs, disagree, or approve code that changes a moment
 later. Merani gives Codex a repeatable way to get another review, check the
@@ -15,6 +15,13 @@ findings, and keep the result tied to the code that was reviewed.
    invalidate the result.
 5. Merani writes private, evidence-bound controller feedback after run lifecycle
    updates without calling another provider or changing the final gate.
+
+Merani Plan is a separate workflow for work that has not been implemented yet.
+Codex investigates a clean or dirty repository, declares evidence needs,
+imports bounded evidence collected through the host session, writes a structured
+task graph, and optionally asks a fresh reviewer to critique the evidence and
+final plan. It publishes deterministic Markdown backed by private hash-bound
+records without creating a fake code diff.
 
 Claude Code is the default reviewer. A separate Codex session, Antigravity
 (Gemini), and Kimi are optional primary reviewers. Merani preflights Codex as a
@@ -47,6 +54,14 @@ Start a new Codex thread, then ask:
 
 > Use $merani to review my uncommitted changes in src/feature and tests/feature.
 
+To create a plan before changing code, ask:
+
+> Use $merani-plan to investigate a bounded retry limit for this worker and create an implementation plan.
+
+`$merani-plan` is the reliable explicit entry. Natural-language activation is
+model-selected. The optional `/merani:plan` command mirrors the skill in clients
+that expose repository commands.
+
 At the start of that thread Merani runs `doctor` before creating a workflow.
 Tasks that need GitHub or GCP add explicit authentication requirements; local
 reviews do not require unrelated cloud accounts.
@@ -78,6 +93,19 @@ Models can miss bugs and report false positives. Merani does not replace tests,
 human judgment, or checks of the deployed system. We have not established that
 this workflow catches more bugs than a single review in a controlled comparison.
 
+A planning result uses `READY`, `DRAFT`, `BLOCKED`, `STALE`, or `SUPERSEDED`.
+`READY` means the pinned request, repository context, declared evidence,
+criterion mapping, required critique, controller review, and local freshness
+checks are complete. It does not approve implementation, Git writes, migrations,
+deployment, or production changes. `plan verify` recomputes local integrity and
+declared evidence age without silently querying an external system.
+
+Planning sessions live separately under `~/.codex/merani-plans` or an absolute
+`MERANI_PLANS_DIR`. Host Codex collects authorized evidence and imports a
+sanitized packet. Reviewer subprocesses receive frozen packet and repository
+bytes without host connectors, shell, memory, credentials, peer reports, or
+controller decisions.
+
 Reviews send source to the selected providers. The snapshot includes the tracked
 repository tree for context, even when you filter the changed paths. Secret
 screening reduces accidental exposure but cannot guarantee that source is safe
@@ -95,6 +123,8 @@ See [reviewer configuration](skills/merani/references/providers.md).
 ## More detail
 
 - [Workflow and commands](skills/merani/SKILL.md)
+- [Planning workflow](skills/merani-plan/SKILL.md)
+- [Planning design and CLI](docs/planning.md)
 - [Review policy](skills/merani/references/review-policy.md)
 - [Contributing and local checks](CONTRIBUTING.md)
 - [Offline testing sandbox](docs/testing.md)

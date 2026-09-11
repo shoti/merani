@@ -37,13 +37,14 @@ class FakeProviderHarness:
         self.bin_dir = self.root / "bin"
         self.config_dir = self.home / ".config" / "merani"
         self.runs_dir = self.home / ".codex" / "review-runs"
+        self.plans_dir = self.home / ".codex" / "merani-plans"
         self.tmp_dir = self.root / "tmp"
         self.hooks_dir = self.root / "disabled-hooks"
         self.state_path = self.root / "provider-state.json"
         self.log_path = self.root / "provider-invocations.jsonl"
         for path in (
             self.home, self.bin_dir, self.config_dir, self.runs_dir,
-            self.tmp_dir, self.hooks_dir,
+            self.plans_dir, self.tmp_dir, self.hooks_dir,
         ):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_path.write_text(
@@ -83,6 +84,7 @@ class FakeProviderHarness:
             "XDG_DATA_HOME": str(self.root / "xdg-data"),
             "MERANI_CONFIG_DIR": str(self.config_dir),
             "MERANI_RUNS_DIR": str(self.runs_dir),
+            "MERANI_PLANS_DIR": str(self.plans_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_SYSTEM": os.devnull,

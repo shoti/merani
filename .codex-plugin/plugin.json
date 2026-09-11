@@ -1,7 +1,7 @@
 {
   "name": "merani",
-  "version": "1.0.0+codex.20260910193340",
-  "description": "A second code review for Codex, with a record of what was checked.",
+  "version": "1.0.0+codex.20260911074524",
+  "description": "Evidence-backed implementation planning and a second code review for Codex.",
   "author": {
     "name": "Shoti",
     "url": "https://github.com/shoti"
@@ -11,6 +11,7 @@
   "license": "MIT",
   "keywords": [
     "code-review",
+    "implementation-planning",
     "codex",
     "claude",
     "gemini",
@@ -19,18 +20,20 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Merani",
-    "shortDescription": "A second review, with a record",
-    "longDescription": "Merani asks another reviewer to read a fixed copy of your code. Codex checks the findings and records its decisions, then a fresh review checks the final changes. Later edits invalidate the result. Reviews use your provider allowance and can still miss bugs.",
+    "shortDescription": "Plan and review changes with evidence",
+    "longDescription": "Merani creates evidence-backed implementation plans before code changes and asks another reviewer to inspect fixed copies of plans or code. Codex checks findings and owns final decisions. Immutable inputs and freshness checks keep results tied to what was inspected. Provider reviews use your allowance and can still miss bugs.",
     "developerName": "Shoti",
     "category": "Developer Tools",
     "capabilities": [
       "Read-only code review",
+      "Evidence-backed implementation planning",
       "Recorded findings and decisions",
-      "Checks for changes after review"
+      "Checks for changes after planning or review"
     ],
     "defaultPrompt": [
       "Review my uncommitted changes and verify the findings.",
-      "Review this branch before I merge it."
+      "Review this branch before I merge it.",
+      "Investigate this feature and create an implementation plan before changing code."
     ]
   }
 }

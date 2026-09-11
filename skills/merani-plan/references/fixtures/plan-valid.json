@@ -1,0 +1,52 @@
+{
+  "artifact_type": "planning_plan",
+  "schema_version": 1,
+  "draft_revision": "draft-fixture",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "context_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "plan_kind": "feature",
+  "goal": "Add a bounded retry limit.",
+  "acceptance_scenarios": ["The worker stops after the configured attempt count."],
+  "reproduction": null,
+  "root_cause_confidence": null,
+  "non_goals": ["Do not deploy from planning."],
+  "constraints": ["Preserve the existing worker API."],
+  "current_architecture": "src/worker.py owns retry behavior.",
+  "chosen_design": "Validate and enforce the limit at the worker boundary.",
+  "alternatives": ["A global retry service expands scope."],
+  "invariants": ["Planning never edits source."],
+  "claims": [],
+  "tasks": [{
+    "id": "TASK1",
+    "title": "Implement bounded retries",
+    "depends_on": [],
+    "requirements": ["AC1"],
+    "evidence": [],
+    "repository_id": "repo1",
+    "locations": [{"path": "src/worker.py", "symbol": "RETRY_LIMIT", "new": false}],
+    "change": "Reject invalid limits and stop after the configured attempt count.",
+    "protected_invariants": ["Planning never edits source."],
+    "verification": "A focused test proves the exact attempt count.",
+    "completion_criteria": "The public worker behavior is bounded.",
+    "rollback": "Revert the worker and focused test together."
+  }],
+  "traceability": [{
+    "criterion_id": "AC1",
+    "task_ids": ["TASK1"],
+    "verification": "Run the focused retry test."
+  }],
+  "verification_commands": [{
+    "id": "CHECK1",
+    "repository_id": "repo1",
+    "working_directory": ".",
+    "command": "python3 -m unittest tests.test_worker",
+    "expected_outcome": "The focused retry test passes."
+  }],
+  "rollout_and_rollback": "No rollout is authorized.",
+  "documentation_and_git": "Update worker docs after implementation.",
+  "open_questions": [],
+  "refresh_instructions": [],
+  "fresh_session_prompt": "Verify the plan and authority, then begin TASK1.",
+  "created_at": "2026-09-11T00:00:00Z"
+}

@@ -5,6 +5,11 @@ description: Get a second code review for Codex, verify findings, and keep decis
 
 # Merani
 
+This skill reviews existing code changes. For repository investigation and an
+implementation plan before source changes, use `$merani-plan` instead. An
+explicit request to implement remains an implementation task; do not route it
+into a planning-only stop.
+
 Codex implements changes, checks reviewer findings, and owns the final decision.
 Reviewers are advisory. Complete the authorized review and repair work without
 asking the user to manage workflow IDs or repeat an approval already given.

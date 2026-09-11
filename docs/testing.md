@@ -9,6 +9,13 @@ provider CLI.
 The runner creates a mode-0700 campaign root below the absolute output directory.
 Synthetic repositories, isolated home/config/run directories, Git configuration,
 provider state, and raw outputs stay below that root, outside the plugin checkout.
+
+Planning regressions use the same fake-provider harness and real temporary Git
+repositories. They cover a clean-checkout local-only READY plan, guarded export,
+source-staleness detection, and required evidence plus final plan critiques
+through the shared provider executor. Contract tests reject wrong schema types,
+cycles, dangling references, unsafe paths, packet bounds, and tampering.
+Automated tests never call a paid provider or external service.
 The child environment is constructed from an allowlist and has no provider
 credentials, SSH agent, credential helper, host hooks, proxy, canonical config,
 or legacy Merani override. Output streams, provider output, fixture size,
