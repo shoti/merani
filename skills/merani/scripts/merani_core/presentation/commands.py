@@ -48,6 +48,27 @@ def dispatch(args: argparse.Namespace, handlers: Mapping[str, Handler]) -> int:
         key = f"reflection.{args.reflection_command}"
     elif key == "workflow":
         key = f"workflow.{args.workflow_command}"
+    elif key == "plan":
+        key = f"plan.{args.plan_command}"
+        if args.plan_command == "start":
+            if bool(args.request_file) == bool(args.task):
+                raise ReviewError("plan start requires exactly one of --request-file or --task.")
+            if args.max_provider_attempts < 1:
+                raise ReviewError("--max-provider-attempts must be at least 1.")
+            if args.max_evidence_cycles < 0:
+                raise ReviewError("--max-evidence-cycles must not be negative.")
+            if args.timeout_minutes < 1:
+                raise ReviewError("--timeout-minutes must be at least 1.")
+            if (
+                not math.isfinite(args.claude_max_budget_usd)
+                or args.claude_max_budget_usd <= 0
+            ):
+                raise ReviewError("--claude-max-budget-usd must be positive.")
+        elif args.plan_command == "review" and args.stage not in {"evidence", "plan"}:
+            raise ReviewError("--stage must be evidence or plan.")
+        elif args.plan_command == "export":
+            if args.replace != bool(args.expected_sha256):
+                raise ReviewError("--replace and --expected-sha256 must be supplied together.")
     elif key == "resume":
         _validate_positive_budget(args)
     elif key == "decide":

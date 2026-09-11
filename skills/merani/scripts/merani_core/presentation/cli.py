@@ -234,6 +234,78 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", dest="output_format", choices=("json", "markdown"), default="json"
     )
 
+    plan = subparsers.add_parser(
+        "plan",
+        help="Create, cross-check, publish, and verify implementation plans",
+    )
+    plan_subparsers = plan.add_subparsers(dest="plan_command", required=True)
+    plan_start = plan_subparsers.add_parser("start", help="Create a private planning request; no provider call")
+    plan_start.add_argument("--repo", action="append", default=[])
+    plan_request = plan_start.add_mutually_exclusive_group(required=True)
+    plan_request.add_argument("--request-file")
+    plan_request.add_argument("--task")
+    plan_start.add_argument("--cross-check", choices=("auto", "required", "off"), default="auto")
+    plan_start.add_argument(
+        "--risk", choices=("low", "normal", "consequential"), default="normal"
+    )
+    plan_start.add_argument("--max-provider-attempts", type=int, default=6)
+    plan_start.add_argument("--max-evidence-cycles", type=int, default=2)
+    plan_start.add_argument("--timeout-minutes", type=int, default=15)
+    plan_start.add_argument("--provider", action="append", choices=("claude", "codex"), default=[])
+    plan_start.add_argument("--claude-model")
+    plan_start.add_argument("--codex-model")
+    plan_start.add_argument(
+        "--claude-effort", choices=sorted(CLAUDE_EFFORTS), default="medium"
+    )
+    plan_start.add_argument("--claude-max-budget-usd", type=float, default=1.25)
+
+    plan_context = plan_subparsers.add_parser("context", help="Capture immutable repository context")
+    plan_context.add_argument("planning_id")
+    plan_context.add_argument("--file", required=True)
+    plan_evidence = plan_subparsers.add_parser("evidence", help="Import a bounded sanitized evidence packet")
+    plan_evidence.add_argument("planning_id")
+    plan_evidence.add_argument("--manifest", required=True)
+    plan_draft = plan_subparsers.add_parser("draft", help="Validate and persist a structured candidate plan")
+    plan_draft.add_argument("planning_id")
+    plan_draft.add_argument("--file", required=True)
+    plan_review = plan_subparsers.add_parser("review", help="Launch an explicit frozen-input planning critique")
+    plan_review.add_argument("planning_id")
+    plan_review.add_argument("--stage", choices=("evidence", "plan"), required=True)
+    plan_review.add_argument("--provider", choices=("claude", "codex"), default="claude")
+    plan_review.add_argument("--model")
+    plan_decide = plan_subparsers.add_parser("decide", help="Record controller dispositions for a current critique")
+    plan_decide.add_argument("planning_id")
+    plan_decide.add_argument("--file", required=True)
+    plan_status = plan_subparsers.add_parser("status", help="Report planning state and the next exact action")
+    plan_status.add_argument("planning_id")
+    plan_status.add_argument("--format", dest="output_format", choices=("json", "compact"), default="json")
+    plan_continue = plan_subparsers.add_parser("continue", help="Calculate the next host or CLI action")
+    plan_continue.add_argument("planning_id")
+    plan_continue.add_argument("--execute-review", action="store_true")
+    plan_continue.add_argument("--provider", choices=("claude", "codex"), default="claude")
+    plan_continue.add_argument("--model")
+    plan_continue.add_argument("--format", dest="output_format", choices=("json", "compact"), default="json")
+    plan_finalize = plan_subparsers.add_parser("finalize", help="Publish a READY or explicitly blocked immutable generation")
+    plan_finalize.add_argument("planning_id")
+    plan_finalize.add_argument("--controller-review-file", required=True)
+    plan_export = plan_subparsers.add_parser("export", help="Safely export the selected PLAN.md publication")
+    plan_export.add_argument("planning_id")
+    plan_export.add_argument("--output", required=True)
+    plan_export.add_argument("--replace", action="store_true")
+    plan_export.add_argument("--expected-sha256")
+    plan_verify = plan_subparsers.add_parser("verify", help="Recompute local integrity and freshness without external queries")
+    plan_verify.add_argument("planning_id")
+    plan_verify.add_argument("--format", dest="output_format", choices=("json", "compact"), default="json")
+    plan_supersede = plan_subparsers.add_parser("supersede", help="Create a linked successor while retaining history and allowance")
+    plan_supersede.add_argument("planning_id")
+    plan_supersede.add_argument("--reason", required=True)
+    plan_supersede.add_argument(
+        "--request-file",
+        help="Pin a changed request without raising the existing lineage limits",
+    )
+    plan_recover = plan_subparsers.add_parser("recover", help="Reconcile orphaned planning attempt ownership")
+    plan_recover.add_argument("planning_id")
+
     continuation = subparsers.add_parser(
         "continue",
         help=(

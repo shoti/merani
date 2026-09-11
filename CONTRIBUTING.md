@@ -1,5 +1,10 @@
 # Contributing to Merani
 
+Changes to planning contracts must update CLI help, `$merani-plan`,
+`docs/planning.md`, the JSON schema, fake-provider scenarios, and semantic tests
+together. Preserve the separate planning state root and never make a planning
+publication satisfy review, commit, CI, deployment, or production gates.
+
 Small, focused pull requests are easiest to review. Explain the problem and
 what changes for the user. Discuss new runtime dependencies before adding them.
 

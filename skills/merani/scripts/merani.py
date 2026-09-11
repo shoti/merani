@@ -30,7 +30,7 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 # ``python path/to/merani.py`` adds this directory automatically. Explicit
 # import-by-path callers do not, so establish the same local-package boundary
@@ -134,6 +134,13 @@ from merani_core.application.query_session import QuerySession
 from merani_core.application.workflows import (
     plan_workflow_continuation,
 )
+from merani_core.adapters.planning_service import PlanningService
+from merani_core.adapters.planning_store import PlanningStore
+from merani_core.domain.planning_contract import critique_schema, render_critique
+from merani_core.presentation.planning import (
+    render_plan as render_planning_plan,
+    render_status as render_planning_status,
+)
 from merani_core.presentation.cli import build_parser as build_cli_parser
 from merani_core.presentation.commands import dispatch as dispatch_cli_command
 
@@ -150,6 +157,7 @@ CONFIG_DIR = _BOOTSTRAP.paths.config_dir
 CONFIG_PATH = _BOOTSTRAP.paths.config_path
 PROVIDER_HEALTH_PATH = _BOOTSTRAP.paths.provider_health_path
 RUNS_DIR = _BOOTSTRAP.paths.runs_dir
+PLANS_DIR = _BOOTSTRAP.paths.plans_dir
 WORKFLOWS_DIR = _BOOTSTRAP.paths.workflows_dir
 SENSITIVE_SCANS_DIR = _BOOTSTRAP.paths.sensitive_scans_dir
 _COMMAND_QUERY_SESSION: QuerySession | None = None
@@ -502,7 +510,9 @@ def runtime_identity(
         bundle_paths.update(standard_scripts.rglob("*.py"))
         for relative in (
             Path("skills/merani/SKILL.md"),
+            Path("skills/merani-plan/SKILL.md"),
             Path("commands/review.md"),
+            Path("commands/plan.md"),
         ):
             candidate = root / relative
             if candidate.is_file():
@@ -510,6 +520,13 @@ def runtime_identity(
         references = root / "skills" / "merani" / "references"
         if references.is_dir():
             bundle_paths.update(path for path in references.rglob("*") if path.is_file())
+        planning_skill = root / "skills" / "merani-plan"
+        if planning_skill.is_dir():
+            bundle_paths.update(
+                path
+                for path in planning_skill.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            )
     else:
         bundle_scope = "minimal"
         core = runner.parent / "merani_core"
@@ -549,6 +566,9 @@ def private_state_permission_hint(path: Path) -> str:
     if path.is_relative_to(RUNS_DIR):
         variable = "MERANI_RUNS_DIR"
         store = "artifact"
+    elif path.is_relative_to(PLANS_DIR):
+        variable = "MERANI_PLANS_DIR"
+        store = "planning artifact"
     elif path.is_relative_to(CONFIG_DIR):
         variable = "MERANI_CONFIG_DIR"
         store = "configuration"
@@ -559,6 +579,261 @@ def private_state_permission_hint(path: Path) -> str:
         f"set {variable} to an absolute private writable directory or approve "
         "access to the configured store."
     )
+
+
+def planning_service() -> PlanningService:
+    return PlanningService(
+        PlanningStore(PLANS_DIR, permission_hint=private_state_permission_hint),
+        runtime_identity=runtime_identity,
+        plan_renderer=render_planning_plan,
+    )
+
+
+def print_planning_result(value: dict[str, Any], output_format: str = "json") -> None:
+    if output_format == "compact" and "next_action" in value:
+        print(render_planning_status(value), end="")
+    else:
+        print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def plan_start_command(args: argparse.Namespace) -> int:
+    providers = list(dict.fromkeys(args.provider or ["claude", "codex"]))
+    result = planning_service().start(
+        request_file=Path(args.request_file) if args.request_file else None,
+        task=args.task,
+        repositories=[Path(item) for item in args.repo],
+        cross_check=args.cross_check,
+        max_provider_attempts=args.max_provider_attempts,
+        max_evidence_cycles=args.max_evidence_cycles,
+        timeout_minutes=args.timeout_minutes,
+        providers=providers,
+        risk=args.risk,
+        provider_models={
+            "claude": args.claude_model,
+            "codex": args.codex_model,
+        },
+        claude_effort=args.claude_effort,
+        claude_max_budget_usd=args.claude_max_budget_usd,
+    )
+    print_planning_result(result)
+    return 0
+
+
+def plan_context_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().capture_context(args.planning_id, Path(args.file))
+    )
+    return 0
+
+
+def plan_evidence_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().import_evidence(args.planning_id, Path(args.manifest))
+    )
+    return 0
+
+
+def plan_draft_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().submit_draft(args.planning_id, Path(args.file))
+    )
+    return 0
+
+
+def planning_reviewer(
+    *,
+    provider: str,
+    model: str | None,
+    schema: dict[str, Any],
+    claude_effort: str,
+    claude_max_budget_usd: float,
+) -> Reviewer:
+    config = load_config()
+    values: dict[str, Any] = {
+        "claude_model": model if provider == "claude" else None,
+        "codex_model": model if provider == "codex" else None,
+        "antigravity_model": None,
+        "kimi_model": None,
+        "claude_effort": claude_effort,
+        "claude_max_budget_usd": claude_max_budget_usd,
+    }
+    for name in PROVIDERS:
+        values[f"with_{name}"] = name == provider
+        values[f"without_{name}"] = name != provider
+    reviewers = build_provider_reviewers(
+        argparse.Namespace(**values),
+        config,
+        review_schema=schema,
+        codex_profile=CODEX_REVIEW_PROFILE_NAME,
+        antigravity_agent_name=ANTIGRAVITY_AGENT_NAME,
+        kimi_agent_path=KIMI_AGENT_PATH,
+        version_of=version_of,
+        binary_available=lambda command: shutil.which(command) is not None,
+        active_cooldown=active_provider_cooldown,
+        readiness=provider_readiness,
+        launcher_path=Path(__file__).resolve(),
+    )
+    if len(reviewers) != 1 or reviewers[0].name != provider:
+        raise ReviewError(f"Could not select exactly one planning reviewer: {provider}.")
+    return reviewers[0]
+
+
+def execute_plan_review(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    service = planning_service()
+    prepared = service.prepare_critique(
+        args.planning_id, stage=args.stage, provider=args.provider
+    )
+    try:
+        schema = critique_schema(args.stage)
+        policy = service.store.request(args.planning_id)["policy"]
+        pinned_model = policy.get("provider_models", {}).get(args.provider)
+        if args.model is not None and pinned_model is not None and args.model != pinned_model:
+            raise ReviewError(
+                f"Requested model {args.model!r} does not match the pinned "
+                f"{args.provider} model {pinned_model!r}."
+            )
+        reviewer = planning_reviewer(
+            provider=args.provider,
+            model=args.model or pinned_model,
+            schema=schema,
+            claude_effort=str(policy.get("claude_effort", "medium")),
+            claude_max_budget_usd=float(
+                policy.get("claude_max_budget_usd", 1.25)
+            ),
+        )
+        result = invoke_reviewer(
+            reviewer,
+            repo=Path(prepared["snapshot_dir"]),
+            prompt=str(prepared["prompt"]),
+            run_dir=Path(prepared["attempt_dir"]),
+            input_dir=Path(prepared["input_dir"]),
+            timeout_seconds=int(prepared["timeout_seconds"]),
+            process_registry=ReviewerProcessRegistry(),
+            response_schema=schema,
+            response_renderer=render_critique,
+        )
+        try:
+            completed = service.complete_critique(
+                args.planning_id,
+                stage=args.stage,
+                provider=args.provider,
+                prepared=prepared,
+                model=reviewer.model,
+                cli_version=reviewer.cli_version,
+                returncode=result.returncode,
+            )
+        except ReviewError as primary_error:
+            permitted = service.store.request(args.planning_id)["policy"][
+                "permitted_providers"
+            ]
+            if (
+                args.provider == "claude"
+                and result.failure_category == "quota"
+                and "codex" in permitted
+            ):
+                fallback_args = argparse.Namespace(
+                    planning_id=args.planning_id,
+                    stage=args.stage,
+                    provider="codex",
+                    model=None,
+                )
+                fallback, fallback_exit = execute_plan_review(fallback_args)
+                fallback["provider_substitution"] = {
+                    "from": "claude",
+                    "to": "codex",
+                    "reason": "typed Claude usage limit",
+                    "same_provider_family_as_controller": True,
+                    "satisfies_distinct_provider_requirement": False,
+                }
+                return fallback, fallback_exit
+            raise primary_error
+        return completed, 0
+    except BaseException:
+        try:
+            service.fail_critique(args.planning_id, prepared)
+        except ReviewError:
+            pass
+        raise
+
+
+def plan_review_command(args: argparse.Namespace) -> int:
+    result, exit_code = execute_plan_review(args)
+    print_planning_result(result)
+    return exit_code
+
+
+def plan_decide_command(args: argparse.Namespace) -> int:
+    print_planning_result(planning_service().decide(args.planning_id, Path(args.file)))
+    return 0
+
+
+def plan_status_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().status(args.planning_id), args.output_format
+    )
+    return 0
+
+
+def plan_continue_command(args: argparse.Namespace) -> int:
+    service = planning_service()
+    status = service.status(args.planning_id)
+    action = status["next_action"]["action"]
+    if args.execute_review and action in {"review_evidence", "review_plan"}:
+        review_args = argparse.Namespace(
+            planning_id=args.planning_id,
+            stage="evidence" if action == "review_evidence" else "plan",
+            provider=args.provider,
+            model=args.model,
+        )
+        result, exit_code = execute_plan_review(review_args)
+        print_planning_result(result)
+        return exit_code
+    if args.execute_review and action not in {"review_evidence", "review_plan"}:
+        raise ReviewError(f"The next planning action {action!r} is not a provider review.")
+    print_planning_result(status, args.output_format)
+    return 0
+
+
+def plan_finalize_command(args: argparse.Namespace) -> int:
+    result, exit_code = planning_service().finalize(
+        args.planning_id, Path(args.controller_review_file)
+    )
+    print_planning_result(result)
+    return exit_code
+
+
+def plan_export_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().export(
+            args.planning_id,
+            Path(args.output),
+            replace=bool(args.replace),
+            expected_sha256=args.expected_sha256,
+        )
+    )
+    return 0
+
+
+def plan_verify_command(args: argparse.Namespace) -> int:
+    result, exit_code = planning_service().verify(args.planning_id)
+    print_planning_result(result, args.output_format)
+    return exit_code
+
+
+def plan_supersede_command(args: argparse.Namespace) -> int:
+    print_planning_result(
+        planning_service().supersede(
+            args.planning_id,
+            args.reason,
+            Path(args.request_file) if args.request_file else None,
+        )
+    )
+    return 0
+
+
+def plan_recover_command(args: argparse.Namespace) -> int:
+    print_planning_result(planning_service().recover(args.planning_id))
+    return 0
 
 
 def safe_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -3538,7 +3813,11 @@ def invoke_reviewer(
     input_dir: Path,
     timeout_seconds: int,
     process_registry: ReviewerProcessRegistry | None = None,
+    response_schema: dict[str, Any] | None = None,
+    response_renderer: Callable[[dict[str, Any]], str] | None = None,
 ) -> ReviewResult:
+    active_schema = CLAUDE_REVIEW_SCHEMA if response_schema is None else response_schema
+    active_renderer = render_structured_review if response_renderer is None else response_renderer
     report_path = run_dir / f"{reviewer.name}.md"
     error_path = run_dir / f"{reviewer.name}.stderr.log"
     environment = reviewer_process_environment(reviewer)
@@ -3550,7 +3829,7 @@ def invoke_reviewer(
         schema_path = input_dir / "review-schema.json"
         safe_write(
             schema_path,
-            json.dumps(CLAUDE_REVIEW_SCHEMA, indent=2, sort_keys=True) + "\n",
+            json.dumps(active_schema, indent=2, sort_keys=True) + "\n",
         )
         command = (
             *command,
@@ -3786,7 +4065,7 @@ def invoke_reviewer(
     report = stdout
     if stdout.strip() and not (stdout_truncated or stderr_truncated):
         decoded = decode_provider_output(
-            reviewer.name, stdout, render_structured_review
+            reviewer.name, stdout, active_renderer
         )
         report = decoded["report"]
         usage = decoded["usage"]
@@ -12653,6 +12932,19 @@ def main() -> int:
         "memory.search": memory_search_command,
         "reflection.regenerate": reflection_command,
         "reflection.show": reflection_command,
+        "plan.start": plan_start_command,
+        "plan.context": plan_context_command,
+        "plan.evidence": plan_evidence_command,
+        "plan.draft": plan_draft_command,
+        "plan.review": plan_review_command,
+        "plan.decide": plan_decide_command,
+        "plan.status": plan_status_command,
+        "plan.continue": plan_continue_command,
+        "plan.finalize": plan_finalize_command,
+        "plan.export": plan_export_command,
+        "plan.verify": plan_verify_command,
+        "plan.supersede": plan_supersede_command,
+        "plan.recover": plan_recover_command,
         "workflow.start": workflow_start_command,
         "workflow.status": workflow_status_command,
         "workflow.raise-provider-attempt-limit": workflow_raise_provider_attempt_limit_command,

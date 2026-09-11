@@ -140,7 +140,7 @@ the launcher itself have no removal date.
 - The provider registry currently accepts the parsed CLI namespace as a
   compatibility bridge. Replace it with a small provider-selection request only
   when run/resume request types move in Phase 4.
-- Python 3.12 and 3.13 Linux coverage comes from CI. Local verification on this
-  host establishes macOS coverage; CI includes macOS to keep it current.
+- Python 3.12 and 3.13 Linux coverage comes from CI. Local verification on a
+  supported macOS host establishes macOS coverage for release handoffs.
 - Architecture checks prove dependency shape, cycles, and absence of selected
   domain I/O. They do not prove behavioral equivalence or fewer agent mistakes.

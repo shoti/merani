@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shoti/merani/schemas/planning-evidence-import-v1.json",
+  "title": "Merani evidence import v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["records", "needs"],
+  "properties": {
+    "records": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "source_class",
+          "source_locator",
+          "observed_at",
+          "retrieved_at",
+          "query_descriptor",
+          "result_status",
+          "complete",
+          "truncated",
+          "shareable",
+          "limitations",
+          "freshness_requirement"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "source_class": {
+            "enum": [
+              "repository",
+              "memory",
+              "official-docs",
+              "gcp",
+              "database",
+              "user-provided"
+            ]
+          },
+          "source_locator": {"type": "string"},
+          "observed_at": {"type": ["string", "null"], "format": "date-time"},
+          "retrieved_at": {"type": "string", "format": "date-time"},
+          "query_descriptor": {"type": "string"},
+          "result_status": {"enum": ["available", "empty", "unavailable"]},
+          "complete": {"type": "boolean"},
+          "truncated": {"type": "boolean"},
+          "shareable": {"type": "boolean"},
+          "limitations": {"type": "array", "items": {"type": "string"}},
+          "freshness_requirement": {"type": "string"},
+          "expires_at": {"type": "string", "format": "date-time"},
+          "payload_path": {"type": "string"},
+          "media_type": {"type": "string"}
+        }
+      }
+    },
+    "needs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "satisfied_by", "rationale"],
+        "properties": {
+          "id": {"type": "string"},
+          "status": {
+            "enum": ["satisfied", "unavailable", "pending", "waived"]
+          },
+          "satisfied_by": {"type": "array", "items": {"type": "string"}},
+          "rationale": {"type": "string"}
+        }
+      }
+    }
+  }
+}

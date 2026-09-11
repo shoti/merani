@@ -1,0 +1,6 @@
+interface:
+  display_name: "Merani Plan"
+  short_description: "Evidence-backed implementation planning"
+  default_prompt: "Use $merani-plan to investigate this request and create a verified implementation plan before changing code."
+policy:
+  allow_implicit_invocation: true

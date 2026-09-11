@@ -6,6 +6,22 @@ Merani is a dependency-free Python modular monolith. The stable executable is
 `python3 skills/merani/scripts/merani.py ...`; persisted JSON and private state
 locations are compatibility contracts.
 
+Implementation planning is a separate workflow under
+`merani_core/{domain,application,adapters,presentation}/planning*.py`. It stores
+artifacts under `RuntimePaths.plans_dir`, outside review runs, so review history,
+analytics, reflection, attestation, and final gates cannot ingest plan records.
+The domain validates graphs and evidence references without I/O. Adapters
+capture repository bytes, import sanitized evidence, enforce revision
+invalidation and readiness, and publish immutable generations behind the
+application protocol. Presentation code renders deterministic Markdown and
+compact status.
+
+`invoke_reviewer` remains the shared protected process owner. Its compatibility
+defaults retain the existing review schema and renderer; planning supplies a
+purpose-specific critique schema and renderer. Planning attempt directories use
+the same durable launch receipts and isolation, with allowance and state kept in
+the separate planning lineage.
+
 The 1.0 stability work was revalidated from clean `origin/main` at
 `8b6acb63ab8ecb77017170c83d948810d4de3afe`: artifact schema 14, plugin
 `0.1.0+codex.20260908105426`, and 291 dependency-free tests on macOS with
@@ -73,18 +89,23 @@ skills/merani/scripts/
       assurance.py, review_contract.py, validation.py
       workflow_policy.py, budget_policy.py, gate_policy.py, metrics.py
       reflection.py                  pure post-run feedback calculation
+      planning.py, planning_contract.py
     application/
       ports.py                     narrow external-capability protocols
       query_session.py             command-scoped read cache
       workflows.py                 read-only continuation planning
+      planning.py                  implementation-plan operation protocol
     adapters/
       storage.py, locking.py, storage_metrics.py, evidence_memory.py
       external_auth.py              task-required CLI authentication probes
       reflection.py                 bounded reads and atomic publication
+      planning_store.py, planning_context.py, planning_evidence.py
+      planning_service.py          resumable planning operation implementation
       providers/
         registry.py, claude.py, codex.py, antigravity.py, kimi.py
     presentation/
       cli.py, commands.py
+      planning.py                  deterministic plan/status rendering
   tests/unit/
     test_architecture.py, test_core_policies.py
 ```

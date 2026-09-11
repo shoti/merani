@@ -103,6 +103,9 @@ class V1StabilityTests(unittest.TestCase):
                 (runner.parent / "merani_core/policy.py").write_text(
                     "VALUE = 1\n", encoding="utf-8"
                 )
+                planning_skill = bundle / "skills/merani-plan/SKILL.md"
+                planning_skill.parent.mkdir(parents=True)
+                planning_skill.write_text("# planning skill\n", encoding="utf-8")
                 identities.append(MERANI.runtime_identity(plugin_root=bundle, runner_path=runner))
             changed = root / "one/skills/merani/scripts/merani_core/policy.py"
             changed.write_text("VALUE = 2\n", encoding="utf-8")
@@ -110,9 +113,20 @@ class V1StabilityTests(unittest.TestCase):
                 plugin_root=root / "one",
                 runner_path=root / "one/skills/merani/scripts/merani.py",
             )
+            changed.write_text("VALUE = 1\n", encoding="utf-8")
+            planning_skill = root / "one/skills/merani-plan/SKILL.md"
+            planning_skill.write_text("# changed planning skill\n", encoding="utf-8")
+            after_planning_change = MERANI.runtime_identity(
+                plugin_root=root / "one",
+                runner_path=root / "one/skills/merani/scripts/merani.py",
+            )
 
         self.assertEqual(identities[0]["bundle_sha256"], identities[1]["bundle_sha256"])
         self.assertNotEqual(identities[0]["bundle_sha256"], after["bundle_sha256"])
+        self.assertNotEqual(
+            identities[0]["bundle_sha256"],
+            after_planning_change["bundle_sha256"],
+        )
         self.assertEqual(identities[0]["bundle_identity_version"], "merani-bundle-v1")
 
     def test_resume_records_new_bundle_and_mid_attempt_drift_invalidates(self) -> None:

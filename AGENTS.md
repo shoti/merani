@@ -1,6 +1,6 @@
 # Repository guidance
 
-This repository contains a Codex plugin and one bundled skill. Keep changes
+This repository contains a Codex plugin and two bundled skills. Keep changes
 small, auditable, and compatible with Python 3.12 or newer on Linux and macOS.
 
 ## Important paths
@@ -8,6 +8,7 @@ small, auditable, and compatible with Python 3.12 or newer on Linux and macOS.
 - `.codex-plugin/plugin.json`: plugin identity and install-surface metadata.
 - `.agents/plugins/marketplace.json`: repository marketplace entry.
 - `skills/merani/SKILL.md`: the user-facing workflow contract.
+- `skills/merani-plan/SKILL.md`: the implementation-planning workflow contract.
 - `skills/merani/scripts/merani.py`: the runner.
 - `skills/merani/scripts/test_merani.py`: the dependency-free
   test suite.
@@ -48,6 +49,10 @@ python3 -m unittest discover \
   -t skills/merani/scripts
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
+for file in skills/merani-plan/references/*.json \
+  skills/merani-plan/references/fixtures/*.json; do
+  python3 -m json.tool "$file" >/dev/null
+done
 for file in skills/merani/scripts/fixtures/*.json; do
   python3 -m json.tool "$file" >/dev/null
 done

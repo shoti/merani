@@ -2182,6 +2182,11 @@ class RunnerUnitTests(unittest.TestCase):
             ),
             mock.patch.object(
                 MM,
+                "codex_cli_contract",
+                return_value=(True, "flags verified"),
+            ),
+            mock.patch.object(
+                MM,
                 "provider_readiness",
                 return_value=MM.ProviderReadiness(False, "quota cooldown"),
             ),
@@ -2550,6 +2555,11 @@ class RunnerUnitTests(unittest.TestCase):
             mock.patch.object(
                 MM,
                 "claude_cli_contract",
+                return_value=(True, "flags verified"),
+            ),
+            mock.patch.object(
+                MM,
+                "codex_cli_contract",
                 return_value=(True, "flags verified"),
             ),
             mock.patch.object(

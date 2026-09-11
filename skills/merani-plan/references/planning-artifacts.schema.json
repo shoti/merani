@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shoti/merani/schemas/planning-artifacts-v1.json",
+  "title": "Merani planning artifacts v1",
+  "type": "object",
+  "required": ["artifact_type", "schema_version"],
+  "properties": {
+    "artifact_type": {
+      "type": "string",
+      "enum": [
+        "planning_request",
+        "planning_context_request",
+        "planning_context_manifest",
+        "planning_evidence_manifest",
+        "planning_plan",
+        "planning_evidence_critique",
+        "planning_plan_critique",
+        "planning_dispositions",
+        "planning_controller_review",
+        "planning_final"
+      ]
+    },
+    "schema_version": {"type": "integer", "const": 1}
+  },
+  "additionalProperties": true,
+  "$comment": "The dependency-free Python validator enforces artifact-specific fields, references, graph acyclicity, path state, and readiness semantics."
+}

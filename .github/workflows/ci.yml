@@ -6,6 +6,7 @@ on:
       - "main"
       - "shoti/merani-v1-stability-*"
       - "shoti/merani-testing-feedback-*"
+      - "shoti/merani-planning-*"
   pull_request:
   workflow_dispatch:
 
@@ -18,13 +19,12 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
+    name: Linux / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -48,6 +48,10 @@ jobs:
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
           python -m json.tool skills/merani/references/reflection.schema.json >/dev/null
           python -m json.tool skills/merani/references/campaign-record.schema.json >/dev/null
+          python -m json.tool skills/merani-plan/references/planning-artifacts.schema.json >/dev/null
+          for file in skills/merani-plan/references/*.json skills/merani-plan/references/fixtures/*.json; do
+            python -m json.tool "$file" >/dev/null
+          done
           for file in skills/merani/scripts/fixtures/*.json; do
             python -m json.tool "$file" >/dev/null
           done
@@ -81,7 +85,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: merani-campaign-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: merani-campaign-linux-py${{ matrix.python-version }}
           path: |
             ${{ runner.temp }}/merani-campaign/campaign-*/campaign-summary.json
             ${{ runner.temp }}/merani-campaign/campaign-*/campaign-report.md
