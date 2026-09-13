@@ -115,6 +115,10 @@ action is an eligible critique. Check `allowance` and explicitly select an
 eligible provider before execution; status never grants new source or evidence
 disclosure authority. If the lineage is exhausted, stop with the typed blocker
 and hand off the incomplete review. A fresh root is not a recovery mechanism.
+When a current critique names `missing_evidence`, collect and import a new
+evidence revision before another critique. If evidence revisions are exhausted,
+report the blocker rather than repeating the same provider call. Corrupt
+attempt metadata blocks further provider admission across successors.
 
 ## Finalize and hand off
 

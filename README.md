@@ -103,6 +103,8 @@ Planning critiques separate blocking missing-input gaps from informational
 static-review and provenance caveats. The latter remain visible in the final
 artifact. `plan status` reports lineage evidence revisions and per-provider
 attempt usage so an exhausted review is shown as blocked before another call.
+Missing evidence in a current critique directs continuation to a new evidence
+revision; unreadable attempt receipts block further provider admission.
 
 Planning sessions live separately under `~/.codex/merani-plans` or an absolute
 `MERANI_PLANS_DIR`. Host Codex collects authorized evidence and imports a

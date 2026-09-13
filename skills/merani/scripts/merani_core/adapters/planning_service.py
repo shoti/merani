@@ -745,6 +745,8 @@ class PlanningService:
             plan_critique_current=current_plan_critique,
             evidence_critique_present=evidence_critique_present,
             plan_critique_present=plan_critique_present,
+            evidence_critique_missing_evidence=self._critique_missing_evidence(session, "evidence", context_ref, evidence_ref, draft_ref),
+            plan_critique_missing_evidence=self._critique_missing_evidence(session, "plan", context_ref, evidence_ref, draft_ref),
             evidence_decisions_complete=evidence_decisions_complete,
             plan_decisions_complete=plan_decisions_complete,
             finalized=finalized,
@@ -1696,6 +1698,22 @@ class PlanningService:
             and not critique.get("coverage", {}).get("blocking_gaps")
             and not critique.get("missing_evidence")
         )
+
+    @staticmethod
+    def _critique_missing_evidence(
+        session: dict[str, Any],
+        stage: str,
+        context_ref: dict[str, Any] | None,
+        evidence_ref: dict[str, Any] | None,
+        draft_ref: dict[str, Any] | None,
+    ) -> bool:
+        if not PlanningService._critique_current(
+            session, stage, context_ref, evidence_ref, draft_ref
+        ):
+            return False
+        reference = session["current_critiques"][stage]
+        critique = read_json(Path(str(reference["path"])))
+        return bool(critique["missing_evidence"])
 
     @staticmethod
     def _critique_caveats(session: dict[str, Any]) -> list[str]:

@@ -169,11 +169,29 @@ class PlanningStore:
             evidence_revisions += len(list((lineage_dir / "evidence").glob("evidence-*")))
             backed_reservations: set[str] = set()
             for metadata_path in lineage_dir.glob("critiques/*/metadata.json"):
+                if metadata_path.is_symlink():
+                    raise ReviewError(
+                        f"Cannot count planning attempt metadata through a symlink: {metadata_path}."
+                    )
                 try:
                     metadata = read_json(metadata_path)
-                except ReviewError:
-                    continue
-                receipts = [item for item in metadata.get("provider_attempts", []) if isinstance(item, dict) and item.get("state") != "not_started"]
+                except ReviewError as exc:
+                    raise ReviewError(
+                        f"Cannot count planning attempt metadata at {metadata_path}; repair or inspect it before another provider attempt."
+                    ) from exc
+                raw_receipts = metadata.get("provider_attempts")
+                if not isinstance(raw_receipts, list) or any(
+                    not isinstance(item, dict)
+                    or item.get("state") not in {"launch_pending", "launched", "completed", "interrupted", "not_started"}
+                    or item.get("provider") not in {"claude", "codex"}
+                    or not isinstance(item.get("attempt_id"), str)
+                    or not item["attempt_id"]
+                    for item in raw_receipts
+                ):
+                    raise ReviewError(
+                        f"Invalid planning attempt metadata at {metadata_path}; refusing to estimate remaining provider attempts."
+                    )
+                receipts = [item for item in raw_receipts if item["state"] != "not_started"]
                 if receipts:
                     backed_reservations.add(str(metadata.get("reservation_id")))
                 for receipt in receipts:

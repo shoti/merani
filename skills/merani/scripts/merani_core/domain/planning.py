@@ -48,6 +48,8 @@ def next_action(
     plan_critique_current: bool,
     evidence_critique_present: bool,
     plan_critique_present: bool,
+    evidence_critique_missing_evidence: bool,
+    plan_critique_missing_evidence: bool,
     evidence_decisions_complete: bool,
     plan_decisions_complete: bool,
     finalized: bool,
@@ -72,12 +74,16 @@ def next_action(
     external_review = external_evidence_review_required(context)
     if required and external_review and evidence_critique_present and not evidence_decisions_complete:
         return {"action": "decide", "reason": "evidence critique issues need controller dispositions", "provider_call": False}
+    if required and external_review and evidence_critique_missing_evidence:
+        return {"action": "collect_evidence", "reason": "evidence critique identified missing evidence; revise the evidence packet before another review", "provider_call": False}
     if required and external_review and not evidence_critique_current:
         return {"action": "review_evidence", "reason": "independent evidence critique is required", "provider_call": True}
     if draft is None:
         return {"action": "submit_draft", "reason": "structured plan draft is missing", "provider_call": False}
     if required and plan_critique_present and not plan_decisions_complete:
         return {"action": "decide", "reason": "plan critique issues need controller dispositions", "provider_call": False}
+    if required and plan_critique_missing_evidence:
+        return {"action": "collect_evidence", "reason": "plan critique identified missing evidence; revise the evidence packet before another review", "provider_call": False}
     if required and not plan_critique_current:
         return {"action": "review_plan", "reason": "fresh independent plan critique is required", "provider_call": True}
     if finalized:

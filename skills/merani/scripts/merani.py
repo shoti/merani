@@ -10397,35 +10397,49 @@ def verify_command(args: argparse.Namespace) -> int:
 def recover_command(args: argparse.Namespace) -> int:
     os.umask(0o077)
     run_dir = resolve_run_dir(args.run)
-    metadata = read_json(run_dir / "metadata.json")
-    if metadata.get("status") not in {"preflight", "running"}:
-        raise ReviewError(
-            f"Only a preflight or running review can be recovered "
-            f"(status={metadata.get('status')})."
-        )
-    alive = process_is_alive(metadata.get("runner_pid"))
-    if alive is True:
-        raise ReviewError(
-            "The recorded review runner process is still alive; refusing to "
-            "mark it failed."
-        )
-    if alive is None and not args.force:
-        raise ReviewError(
-            "This older run has no runner PID. Recheck that no reviewer is "
-            "active, then rerun with --force."
-        )
-    update_metadata(
-        run_dir,
-        status="failed",
-        completed_at=utc_now(),
-        duration_seconds=elapsed_since(
-            str(metadata.get("started_at") or metadata.get("created_at"))
-        ),
-        failure={
-            "type": "stale_runner_recovered",
-            "message": "Running metadata was recovered after its runner exited.",
-        },
-    )
+    with exclusive_file_lock(run_dir / "provider-attempts"):
+        metadata = read_json(run_dir / "metadata.json")
+        if metadata.get("status") not in {"preflight", "running"}:
+            raise ReviewError(
+                f"Only a preflight or running review can be recovered "
+                f"(status={metadata.get('status')})."
+            )
+        alive = process_is_alive(metadata.get("runner_pid"))
+        if alive is True:
+            raise ReviewError(
+                "The recorded review runner process is still alive; refusing to "
+                "mark it failed."
+            )
+        if alive is None and not args.force:
+            raise ReviewError(
+                "This older run has no runner PID. Recheck that no reviewer is "
+                "active, then rerun with --force."
+            )
+        receipts = provider_attempt_receipts(metadata)
+        recovered_at = utc_now()
+        for receipt in receipts:
+            if receipt["state"] not in {"launch_pending", "launched"}:
+                continue
+            receipt.update({
+                "state": "interrupted",
+                "completed_at": recovered_at,
+                "outcome": "interrupted",
+                "usage": None,
+                "usage_status": "unknown",
+                "failure_category": "stale_runner_recovered",
+            })
+        metadata.update({
+            "status": "failed",
+            "completed_at": recovered_at,
+            "duration_seconds": elapsed_since(
+                str(metadata.get("started_at") or metadata.get("created_at"))
+            ),
+            "failure": {
+                "type": "stale_runner_recovered",
+                "message": "Running metadata was recovered after its runner exited.",
+            },
+        })
+        safe_write_json(run_dir / "metadata.json", metadata)
     workflow_identifier = str(metadata.get("workflow_id") or "")
     run_identifier = str(metadata.get("run_id") or "")
     if workflow_identifier and run_identifier:
