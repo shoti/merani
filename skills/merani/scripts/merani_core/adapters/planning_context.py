@@ -91,6 +91,18 @@ def _gitlinks(repo: Path) -> dict[str, str]:
     return result
 
 
+def _skip_worktree_paths(repo: Path) -> set[str]:
+    """Index omissions are not working-tree deletions, even when both lack bytes."""
+    output = _git(repo, "ls-files", "-v", "-z").stdout.decode(
+        "utf-8", errors="surrogateescape"
+    )
+    return {
+        _safe_relative(item[2:])
+        for item in output.split("\0")
+        if item and item.startswith("S ")
+    }
+
+
 def capture_context(
     context_request: dict[str, Any],
     *,
@@ -124,6 +136,7 @@ def capture_context(
         include_untracked = bool(repository.get("include_untracked", True))
         paths = list_repository_paths(repo, include_untracked=include_untracked)
         gitlinks = _gitlinks(repo)
+        skip_worktree = _skip_worktree_paths(repo)
         repo_snapshot = snapshot_root / repository_id
         repo_snapshot.mkdir(mode=0o700)
         entries: list[dict[str, Any]] = []
@@ -174,7 +187,14 @@ def capture_context(
                 try:
                     metadata = source.lstat()
                 except FileNotFoundError:
-                    entry["reason"] = "tracked path is missing in the working tree"
+                    if relative in skip_worktree:
+                        entry["reason"] = "skip-worktree content omitted"
+                        coverage = "limited"
+                        limitations.append(
+                            f"skip-worktree content unavailable: {repository_id}/{relative}"
+                        )
+                    else:
+                        entry["reason"] = "tracked path deleted in the working tree"
                     entries.append(entry)
                     continue
                 entry["mode"] = stat.S_IMODE(metadata.st_mode)
@@ -234,6 +254,8 @@ def capture_context(
         )
         if before_status != after_status or before_head != after_head:
             raise ReviewError(f"Repository changed during planning context capture: {repo}.")
+        if skip_worktree != _skip_worktree_paths(repo):
+            raise ReviewError(f"Repository skip-worktree flags changed during planning context capture: {repo}.")
         current_gitlinks = _gitlinks(repo)
         for entry in entries:
             if not entry.get("included"):
@@ -320,6 +342,7 @@ def verify_context(manifest: dict[str, Any], *, generated_exclusions: set[str] |
                     include_untracked=bool(repository.get("include_untracked", True)),
                 )
             current_paths = set(current_path_list) - repository_exclusions
+            current_skip_worktree = _skip_worktree_paths(repo)
         except ReviewError as exc:
             errors.append(str(exc))
             continue
@@ -339,6 +362,13 @@ def verify_context(manifest: dict[str, Any], *, generated_exclusions: set[str] |
             if entry.get("reason") == "explicit exclusion":
                 continue
             if entry.get("kind") == "missing":
+                if relative in current_skip_worktree:
+                    if entry.get("reason") != "skip-worktree content omitted":
+                        errors.append(f"captured deletion is now a skip-worktree omission: {repo}/{relative}")
+                    if repository.get("coverage") == "complete":
+                        errors.append(f"skip-worktree omission was marked complete: {repo}/{relative}")
+                elif entry.get("reason") == "skip-worktree content omitted":
+                    errors.append(f"captured skip-worktree flag changed: {repo}/{relative}")
                 if source.exists() or source.is_symlink():
                     errors.append(f"captured missing path now exists: {repo}/{relative}")
                 continue
@@ -383,6 +413,10 @@ def verify_snapshot(manifest: dict[str, Any], snapshot_root: Path) -> list[str]:
         repository_id = str(repository.get("id"))
         root = snapshot_root / repository_id
         for entry in repository.get("entries", []):
+            if (entry.get("kind") == "missing"
+                    and entry.get("reason") == "skip-worktree content omitted"
+                    and repository.get("coverage") == "complete"):
+                errors.append(f"skip-worktree omission was marked complete: {repository_id}/{entry['path']}")
             if not entry.get("included"):
                 continue
             relative = str(entry["path"])

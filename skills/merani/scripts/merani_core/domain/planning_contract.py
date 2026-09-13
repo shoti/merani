@@ -340,6 +340,10 @@ def validate_context_manifest(document: dict[str, Any]) -> dict[str, Any]:
                 _boolean(entry.get("binary"), f"{prefix}.binary")
             if entry.get("reason") is not None:
                 _string(entry.get("reason"), f"{prefix}.reason")
+            if (entry.get("kind") == "missing"
+                    and entry.get("reason") == "skip-worktree content omitted"
+                    and repository.get("coverage") == "complete"):
+                raise ReviewError(f"Skip-worktree omission cannot have complete coverage: {path}.")
     if not repository_ids:
         raise ReviewError("Context manifest has no repositories.")
     _array(document.get("claims"), "claims")
@@ -356,7 +360,9 @@ def validate_context_manifest(document: dict[str, Any]) -> dict[str, Any]:
         evidence_decision.get("rationale"),
         "external_evidence_decision.rationale",
     )
-    _string_list(document.get("limitations"), "limitations", unique=True)
+    context_limitations = _string_list(document.get("limitations"), "limitations", unique=True)
+    if any(repository.get("coverage") == "limited" for repository in repositories) and not context_limitations:
+        raise ReviewError("Limited repository coverage must name its blocking limitations.")
     _timestamp(document.get("captured_at"), "captured_at")
     _sha256(document.get("content_sha256"), "content_sha256")
     if content_sha256({**document, "content_sha256": None}) != document["content_sha256"]:
@@ -583,8 +589,15 @@ def validate_critique(document: dict[str, Any], *, stage: str) -> dict[str, Any]
         _id_list(issue.get("affected_task_ids", []), f"issues[{index}].affected_task_ids")
     _string_list(document.get("missing_evidence", []), "missing_evidence", unique=True)
     coverage = _object(document.get("coverage"), "coverage")
-    _boolean(coverage.get("complete"), "coverage.complete")
-    _string_list(coverage.get("limitations", []), "coverage.limitations", unique=True)
+    if set(coverage) != {"complete", "blocking_gaps", "caveats"}:
+        raise ReviewError("coverage must explicitly contain complete, blocking_gaps, and caveats only; legacy limitations are ambiguous.")
+    complete = _boolean(coverage.get("complete"), "coverage.complete")
+    gaps = _string_list(coverage.get("blocking_gaps"), "coverage.blocking_gaps", unique=True)
+    _string_list(coverage.get("caveats"), "coverage.caveats", unique=True)
+    if complete and gaps:
+        raise ReviewError("coverage.complete cannot be true with blocking_gaps.")
+    if not complete and not gaps:
+        raise ReviewError("incomplete coverage must name at least one blocking_gap.")
     _enum(document.get("advisory_assessment"), "advisory_assessment", ("acceptable", "revise", "blocked"))
     return document
 
@@ -627,6 +640,7 @@ def validate_final(document: dict[str, Any]) -> dict[str, Any]:
         _sha256(document.get(field), field)
     _string(document.get("review_coverage"), "review_coverage")
     _string_list(document.get("limitations"), "limitations", unique=True)
+    _string_list(document.get("coverage_caveats"), "coverage_caveats", unique=True)
     _string_list(
         document.get("evidence_refresh_requirements"),
         "evidence_refresh_requirements",
@@ -715,10 +729,11 @@ def critique_schema(stage: str) -> dict[str, Any]:
         "coverage": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["complete", "limitations"],
+            "required": ["complete", "blocking_gaps", "caveats"],
             "properties": {
                 "complete": {"type": "boolean"},
-                "limitations": {"type": "array", "items": {"type": "string"}},
+                "blocking_gaps": {"type": "array", "items": {"type": "string"}},
+                "caveats": {"type": "array", "items": {"type": "string"}},
             },
         },
         "advisory_assessment": {"type": "string", "enum": ["acceptable", "revise", "blocked"]},
@@ -753,4 +768,8 @@ def render_critique(document: dict[str, Any]) -> str:
     if document["missing_evidence"]:
         lines.extend(["", "## Missing evidence", ""])
         lines.extend(f"- {item}" for item in document["missing_evidence"])
+    for key, title in (("blocking_gaps", "Blocking coverage gaps"), ("caveats", "Scope and provenance caveats")):
+        if document["coverage"][key]:
+            lines.extend(["", f"## {title}", ""])
+            lines.extend(f"- {item}" for item in document["coverage"][key])
     return "\n".join(lines).rstrip() + "\n"

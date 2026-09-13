@@ -68,6 +68,7 @@ def render_plan(
     baseline: list[str],
     review_coverage: str,
     limitations: list[str],
+    coverage_caveats: list[str],
     context: dict[str, Any],
     evidence: dict[str, Any] | None,
 ) -> str:
@@ -147,6 +148,10 @@ def render_plan(
         "Limitations:",
         "",
         *_items(limitations, empty="No captured limitations."),
+        "",
+        "Review scope and provenance caveats:",
+        "",
+        *_items(coverage_caveats, empty="No review caveats."),
         "",
         "## Chosen design and alternatives",
         "",
