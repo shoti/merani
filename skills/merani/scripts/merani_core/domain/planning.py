@@ -46,7 +46,10 @@ def next_action(
     draft: dict[str, Any] | None,
     evidence_critique_current: bool,
     plan_critique_current: bool,
-    dispositions_complete: bool,
+    evidence_critique_present: bool,
+    plan_critique_present: bool,
+    evidence_decisions_complete: bool,
+    plan_decisions_complete: bool,
     finalized: bool,
 ) -> dict[str, Any]:
     if session.get("superseded_by"):
@@ -67,16 +70,16 @@ def next_action(
         return {"action": "collect_evidence", "reason": "blocking evidence needs are unresolved", "provider_call": False}
     required = independent_review_required(request, context)
     external_review = external_evidence_review_required(context)
+    if required and external_review and evidence_critique_present and not evidence_decisions_complete:
+        return {"action": "decide", "reason": "evidence critique issues need controller dispositions", "provider_call": False}
     if required and external_review and not evidence_critique_current:
         return {"action": "review_evidence", "reason": "independent evidence critique is required", "provider_call": True}
-    if required and external_review and not dispositions_complete:
-        return {"action": "decide", "reason": "evidence critique issues need controller dispositions", "provider_call": False}
     if draft is None:
         return {"action": "submit_draft", "reason": "structured plan draft is missing", "provider_call": False}
+    if required and plan_critique_present and not plan_decisions_complete:
+        return {"action": "decide", "reason": "plan critique issues need controller dispositions", "provider_call": False}
     if required and not plan_critique_current:
         return {"action": "review_plan", "reason": "fresh independent plan critique is required", "provider_call": True}
-    if required and not dispositions_complete:
-        return {"action": "decide", "reason": "plan critique issues need controller dispositions", "provider_call": False}
     if finalized:
         return {"action": "complete", "reason": "current publication is finalized", "provider_call": False}
     return {"action": "finalize", "reason": "all declared inputs are present", "provider_call": False}

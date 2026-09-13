@@ -160,31 +160,58 @@ class PlanningStore:
             if session.get("lineage_id") == lineage_id:
                 yield candidate.parent, session
 
+    def _usage_unlocked(self, lineage_id: str, providers: list[str], maximum: int, evidence_maximum: int) -> dict[str, Any]:
+        used = {provider: 0 for provider in providers}
+        reserved = {provider: 0 for provider in providers}
+        owners: list[dict[str, Any]] = []
+        evidence_revisions = 0
+        for lineage_dir, lineage_session in self.lineage_sessions(lineage_id):
+            evidence_revisions += len(list((lineage_dir / "evidence").glob("evidence-*")))
+            backed_reservations: set[str] = set()
+            for metadata_path in lineage_dir.glob("critiques/*/metadata.json"):
+                try:
+                    metadata = read_json(metadata_path)
+                except ReviewError:
+                    continue
+                receipts = [item for item in metadata.get("provider_attempts", []) if isinstance(item, dict) and item.get("state") != "not_started"]
+                if receipts:
+                    backed_reservations.add(str(metadata.get("reservation_id")))
+                for receipt in receipts:
+                    provider = receipt.get("provider")
+                    if provider in used:
+                        used[provider] += 1
+            for reservation_id, item in lineage_session.get("attempt_reservations", {}).items():
+                if not isinstance(item, dict):
+                    continue
+                provider = item.get("provider")
+                if provider in reserved:
+                    if reservation_id not in backed_reservations:
+                        reserved[provider] += 1
+                    owners.append({"session_id": lineage_session["session_id"], "provider": provider, "stage": item.get("stage"), "reserved_at": item.get("reserved_at"), "runner_pid": item.get("runner_pid")})
+        return {
+            "per_provider": {provider: {"used": used[provider], "reserved": reserved[provider], "remaining": max(0, maximum - used[provider] - reserved[provider]), "limit": maximum} for provider in providers},
+            "aggregate_used": sum(used.values()),
+            "aggregate_reserved": sum(reserved.values()),
+            "evidence_revisions": {"used": evidence_revisions, "remaining": max(0, evidence_maximum + 1 - evidence_revisions), "limit": evidence_maximum + 1},
+            "active_ownership": owners,
+        }
+
+    def usage_summary(self, session_id: str, *, providers: list[str], maximum: int, evidence_maximum: int) -> dict[str, Any]:
+        _, session = self.require(session_id)
+        lineage_id = str(session.get("lineage_id") or session_id)
+        lock = self.root / f".{lineage_id}.provider-usage"
+        with exclusive_file_lock(lock, permission_hint=self.permission_hint):
+            return self._usage_unlocked(lineage_id, providers, maximum, evidence_maximum)
+
     def reserve_attempt(self, session_id: str, *, provider: str, stage: str, maximum: int) -> str:
         directory, session = self.require(session_id)
         lineage_id = str(session.get("lineage_id") or session_id)
         lock = self.root / f".{lineage_id}.provider-usage"
         with exclusive_file_lock(lock, permission_hint=self.permission_hint):
-            used = 0
-            for lineage_dir, lineage_session in self.lineage_sessions(lineage_id):
-                for metadata_path in lineage_dir.glob("critiques/*/metadata.json"):
-                    try:
-                        metadata = read_json(metadata_path)
-                    except ReviewError:
-                        continue
-                    used += sum(
-                        1
-                        for item in metadata.get("provider_attempts", [])
-                        if isinstance(item, dict) and item.get("provider") == provider and item.get("state") != "not_started"
-                    )
-                used += sum(
-                    1
-                    for item in lineage_session.get("attempt_reservations", {}).values()
-                    if isinstance(item, dict) and item.get("provider") == provider
-                )
-            if used >= maximum:
+            usage = self._usage_unlocked(lineage_id, [provider], maximum, 0)["per_provider"][provider]
+            if usage["remaining"] == 0:
                 raise ReviewError(
-                    f"Planning lineage provider-attempt allowance exhausted for {provider} ({used}/{maximum})."
+                    f"Planning lineage provider-attempt allowance exhausted for {provider} ({usage['used'] + usage['reserved']}/{maximum})."
                 )
             reservation_id = f"reservation-{uuid.uuid4().hex}"
             def add(current: dict[str, Any]) -> None:

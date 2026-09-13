@@ -111,7 +111,10 @@ history, reflection, host connectors, shell access, or credentials.
 
 `plan continue` is read-only. It returns the next typed host or CLI action. It
 launches a provider only with `--execute-review` and only when the current next
-action is an eligible critique.
+action is an eligible critique. Check `allowance` and explicitly select an
+eligible provider before execution; status never grants new source or evidence
+disclosure authority. If the lineage is exhausted, stop with the typed blocker
+and hand off the incomplete review. A fresh root is not a recovery mechanism.
 
 ## Finalize and hand off
 
@@ -129,6 +132,10 @@ a complete task graph, full criterion coverage, current source and bundle
 bindings, satisfied blocking evidence, no blocking questions or issues, and a
 fresh required critique. `plan verify` checks local integrity and declared
 freshness; it reports an external refresh need without running a cloud query.
+An informational critique caveat remains visible in Markdown and JSON without
+blocking READY; a blocking coverage gap, missing evidence, or ambiguous legacy
+coverage blocks it. A skip-worktree path absent on disk is an incomplete source
+capture, while an ordinary tracked working-tree deletion remains a deletion.
 
 Export never overwrites by default. Replacement requires `--replace` plus the
 exact current destination SHA-256 and cannot target a captured source,

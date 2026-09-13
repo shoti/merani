@@ -15,6 +15,8 @@ commit attestation, CI result, deployment gate, or production check.
    inventory from each declared repository. It stores bytes, modes, symlink
    targets, missing paths, hashes, dirty status, and limitations without
    requiring a code diff.
+   A missing skip-worktree path is an explicit coverage gap; a tracked file
+   deleted in the ordinary working tree retains distinct deletion semantics.
 3. Codex declares evidence needs. It may use current code, dated project-memory
    leads, primary documentation, bounded runtime logs, read-only schema/state,
    or user material through tools already available and authorized in the host
@@ -41,17 +43,31 @@ manifest bytes; a separate source binding invalidates that report whenever the
 private evidence revision changes. Non-shareable records never appear in the
 reviewer packet, and a required critique blocks when its plan or blocking need
 depends on them.
+Critique coverage distinguishes `blocking_gaps` from informational `caveats`.
+An honest note that a static reviewer did not execute a production query stays
+visible in the final artifact and does not itself block READY. Omitted relevant
+inputs, incomplete coverage, and missing required evidence do block. Legacy
+untyped `limitations` cannot satisfy the current critique contract.
 
 `plan continue` reports one typed next action. It is read-only unless
 `--execute-review` is explicitly supplied and the next action is an eligible
 provider critique. It never runs model-generated commands or collects external
 evidence. Provider calls remain bounded by the planning lineage's per-provider
-attempt ceiling. Supersession retains that lineage; recovery reconciles dead
+attempt ceiling. Status shows used, reserved, and remaining attempts for every
+permitted provider, the aggregate, evidence revisions, and active ownership.
+It returns a blocked action when no admitted continuation can run. Supersession retains that lineage; recovery reconciles dead
 ownership and never relaunches automatically. A successor may pin a changed
 request with `--request-file`, but it cannot raise lineage attempt or evidence
 cycle limits, add providers, or raise the Claude per-call cap. A superseded
 session remains readable and cannot regain READY or be exported as current
 authority.
+Reimporting an identical validated evidence packet reuses its current revision
+without invalidating critiques or consuming a cycle. A changed packet needs a
+fresh revision and is rejected when the lineage ceiling is exhausted.
+Recovery marks a dead owner's launched receipt interrupted with unknown usage
+and records a bounded terminal reason. Exit-zero output is accepted only after
+schema, binding, and referenced-ID checks; rejected reports remain failed
+attempts and never become current critiques.
 
 ## Command surface
 

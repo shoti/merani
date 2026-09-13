@@ -99,6 +99,10 @@ criterion mapping, required critique, controller review, and local freshness
 checks are complete. It does not approve implementation, Git writes, migrations,
 deployment, or production changes. `plan verify` recomputes local integrity and
 declared evidence age without silently querying an external system.
+Planning critiques separate blocking missing-input gaps from informational
+static-review and provenance caveats. The latter remain visible in the final
+artifact. `plan status` reports lineage evidence revisions and per-provider
+attempt usage so an exhausted review is shown as blocked before another call.
 
 Planning sessions live separately under `~/.codex/merani-plans` or an absolute
 `MERANI_PLANS_DIR`. Host Codex collects authorized evidence and imports a

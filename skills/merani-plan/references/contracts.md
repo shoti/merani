@@ -22,6 +22,9 @@ enforces graph, reference, path, freshness, and readiness semantics.
 `created_at`, and policy. Policy contains `cross_check`,
 `max_provider_attempts`, `max_evidence_cycles`, `timeout_minutes`, and
 `permitted_providers` (`claude` and/or `codex`).
+Provider attempts are capped separately for each permitted provider across the
+lineage. Status shows used, reserved, and remaining attempts per provider and
+in aggregate; a successor does not reset the allowance.
 
 `planning_context_request` contains repositories with the same IDs and paths,
 `include_untracked`, and exact `exclude_paths`. It also contains claims and
@@ -82,8 +85,12 @@ Each verification command has a stable `id`, `repository_id`, repository-relativ
 Critiques are produced through a provider JSON schema. Evidence critiques bind
 the request, context, and evidence hashes. Plan critiques also bind the exact
 draft hash. Issues contain `id`, severity, assessment, title, reason,
-`evidence_ids`, and `affected_task_ids`. Coverage declares completeness and
-limitations. Provider assessments are advisory.
+`evidence_ids`, and `affected_task_ids`. Coverage has exactly `complete`,
+`blocking_gaps`, and `caveats`. Missing relevant input belongs in
+`blocking_gaps` with `complete=false`; honest static-review, scope, and
+provenance notes belong in `caveats` and remain in the final Markdown and JSON.
+Legacy `limitations` coverage is ambiguous and cannot satisfy a current gate.
+Provider assessments are advisory.
 
 `planning_dispositions` binds `critique_sha256` and contains one decision for
 every issue: `issue_id`, `disposition`, `rationale`, `evidence_ids`, and optional

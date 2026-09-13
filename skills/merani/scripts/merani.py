@@ -683,6 +683,7 @@ def execute_plan_review(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     prepared = service.prepare_critique(
         args.planning_id, stage=args.stage, provider=args.provider
     )
+    result = None
     try:
         schema = critique_schema(args.stage)
         policy = service.store.request(args.planning_id)["policy"]
@@ -748,11 +749,30 @@ def execute_plan_review(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 return fallback, fallback_exit
             raise primary_error
         return completed, 0
-    except BaseException:
+    except BaseException as primary_error:
         try:
-            service.fail_critique(args.planning_id, prepared)
-        except ReviewError:
-            pass
+            launched = False
+            if result is None:
+                try:
+                    attempt_metadata = read_json(Path(prepared["attempt_dir"]) / "metadata.json")
+                    launched = any(
+                        isinstance(receipt, dict)
+                        and receipt.get("state") not in {None, "not_started"}
+                        for receipt in attempt_metadata.get("provider_attempts", [])
+                    )
+                except ReviewError:
+                    pass
+            category = (
+                "interrupted" if isinstance(primary_error, (KeyboardInterrupt, SystemExit))
+                else "missing_structured_output" if result is not None and result.failure_category == "empty_response"
+                else (result.failure_category or "provider_process_failed") if result is not None and result.returncode != 0
+                else prepared.get("terminal_category", "invalid_report") if result is not None
+                else "invalid_report" if launched
+                else "preflight_failed"
+            )
+            service.fail_critique(args.planning_id, prepared, category=category)
+        except ReviewError as cleanup_error:
+            primary_error.add_note(f"Planning attempt cleanup also failed: {cleanup_error}")
         raise
 
 
@@ -779,6 +799,10 @@ def plan_continue_command(args: argparse.Namespace) -> int:
     status = service.status(args.planning_id)
     action = status["next_action"]["action"]
     if args.execute_review and action in {"review_evidence", "review_plan"}:
+        if args.provider not in status["next_action"].get("eligible_providers", []):
+            status["next_action"] = {"action": "blocked", "reason": f"selected provider {args.provider} has no remaining permitted lineage attempt; choose an eligible provider explicitly", "provider_call": False, "blocker_type": "selected_provider_exhausted", "eligible_providers": status["next_action"].get("eligible_providers", [])}
+            print_planning_result(status, args.output_format)
+            return 3
         review_args = argparse.Namespace(
             planning_id=args.planning_id,
             stage="evidence" if action == "review_evidence" else "plan",
