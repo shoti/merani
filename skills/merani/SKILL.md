@@ -83,15 +83,22 @@ tests alone cannot establish those interactions.
 Read every report and `review-summary.json`, including coverage limitations.
 Before triaging, read [review-policy.md](references/review-policy.md).
 Trace findings through the actual code and side-effect path; model agreement is
-not evidence. Record every finding and test-gap decision with `decide` or
-`decide-batch`. Informational observations remain in the reports and final
-artifact; acknowledging them is optional and never required to proceed.
+not evidence. When several finding or test-gap decisions for one run are ready,
+record them in one `decide-batch --run <run-dir> --item '<JSON>' ...` call. Verify
+each decision separately first; batch only decisions valid against the current
+source. Use `decide` for a single ready decision. Informational observations
+remain in the reports and final artifact; acknowledging them is optional and
+never required to proceed.
 
 Fix only confirmed issues. A `fixed` finding or an accepted gap marked `covered`
 requires verification and changed scoped source. Before another provider call,
 run the required local checks and record the results with `--local-verification`.
-Attach source-bound evidence to pinned claims with `assure` or `assure-batch`;
-critical invariants cannot be deferred. The policy reference has the contracts.
+When evidence for several pinned claims on the same run and source fingerprint
+is ready, record it in one `assure-batch --run <run-dir> --item '<JSON>' ...` call.
+Use `assure` for a single ready claim. Both commands apply the same freshness,
+contract, and secret checks; batching avoids repeating those checks and CLI
+startup for each claim. Critical invariants cannot be deferred. The policy
+reference has the contracts.
 
 Use `continue <workflow-id>` for the next exact action. It is read-only unless
 `--execute-review` is explicitly supplied or saved policy authorizes automatic
@@ -182,7 +189,9 @@ exits 3. Reflection publication warnings never replace the primary command exit.
 ## Return a useful result
 
 For elapsed-time investigations, use the read-only `scripts/merani_timeline.py`
-export with the exact planning and review lineage directories. Its provider
+export with the exact planning and review lineage directories. If a review
+directory contains multiple workflows, pass each intended workflow ID with
+`--review-workflow` so unrelated receipts remain excluded. Its provider
 receipts do not measure the controller's full task or full CLI-local time; see
 `../../docs/benchmark-timeline.md` before attributing a wall-clock remainder.
 

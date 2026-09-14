@@ -28,6 +28,8 @@ For benchmark or incident analysis, the offline
 one planning lineage and one code-review lineage from private attempt receipts.
 It reports measured provider time and cost while leaving unmeasured controller
 and full CLI-local time explicit. See [the timeline guide](docs/benchmark-timeline.md).
+For successor workflows stored under one review directory, select each exact
+workflow ID with repeated `--review-workflow` flags.
 
 Claude Code is the default reviewer. A separate Codex session, Antigravity
 (Gemini), and Kimi are optional primary reviewers. Merani preflights Codex as a
@@ -100,6 +102,10 @@ local review evidence does not establish CI, deployment, or runtime behavior.
 Checks and supporting evidence are reported by Codex. Merani checks that every
 declared check has a result, but cannot prove every statement is true or discover
 a requirement left out of the original list.
+
+When several findings or claim assurances are ready for the same run, use
+`decide-batch` or `assure-batch` to record them in one checked transaction. This
+reduces repeated CLI and freshness-check work without changing review rounds.
 
 Models can miss bugs and report false positives. Merani does not replace tests,
 human judgment, or checks of the deployed system. We have not established that
