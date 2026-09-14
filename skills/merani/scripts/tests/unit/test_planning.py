@@ -177,6 +177,79 @@ def planning_request(repo: Path) -> dict[str, object]:
 
 
 class PlanningContractTests(unittest.TestCase):
+    def test_critique_prompt_distinguishes_evidence_tasks_and_criteria(self) -> None:
+        bindings = {"request_sha256": "request", "context_sha256": "context", "evidence_sha256": "evidence"}
+        without_evidence = PlanningService._critique_prompt(
+            "plan", bindings, evidence_staged=False, evidence_ids=[], task_ids=["TASK1"]
+        )
+        self.assertIn("evidence_ids must be []", without_evidence)
+        self.assertIn("Acceptance-criterion IDs are not evidence IDs", without_evidence)
+        self.assertIn('affected_task_ids may contain only ["TASK1"]', without_evidence)
+        self.assertNotIn("Read evidence.json", without_evidence)
+        self.assertNotIn("and evidence.json", without_evidence)
+
+        with_evidence = PlanningService._critique_prompt(
+            "plan", bindings, evidence_staged=True, evidence_ids=["EV1"], task_ids=["TASK1"]
+        )
+        self.assertIn('evidence_ids may contain only ["EV1"]', with_evidence)
+        self.assertNotIn("evidence_ids must be []", with_evidence)
+        self.assertIn("evidence.json", with_evidence)
+
+        evidence_stage = PlanningService._critique_prompt(
+            "evidence", bindings, evidence_staged=True, evidence_ids=["EV1"], task_ids=[]
+        )
+        self.assertIn("affected_task_ids must be []", evidence_stage)
+
+    def test_plan_critique_without_evidence_rejects_criterion_as_evidence_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            harness = FakeProviderHarness(root / "harness")
+            request_file = root / "request.json"
+            write_json(request_file, planning_request(repo))
+            session_id = json.loads(harness.cli(
+                repo, "plan", "start", "--request-file", str(request_file)
+            ).stdout)["session_id"]
+            context_file = root / "context.json"
+            write_json(context_file, context_request(repo))
+            context = json.loads(harness.cli(repo, "plan", "context", session_id, "--file", str(context_file)).stdout)
+            draft_file = root / "draft.json"
+            write_json(draft_file, plan_draft())
+            draft = json.loads(harness.cli(repo, "plan", "draft", session_id, "--file", str(draft_file)).stdout)
+            session = json.loads((harness.plans_dir / session_id / "session.json").read_text())
+            issue = {
+                "id": "ISSUE1", "severity": "medium", "assessment": "supported",
+                "title": "Verify the acceptance path", "reason": "The plan needs a concrete acceptance check.",
+                "evidence_ids": ["AC1"], "affected_task_ids": ["TASK1"],
+            }
+            report = {
+                "artifact_type": "planning_plan_critique", "schema_version": 1,
+                "request_sha256": session["request_sha256"],
+                "context_sha256": context["context_sha256"],
+                "evidence_sha256": content_sha256({}),
+                "draft_sha256": draft["draft_sha256"],
+                "issues": [issue], "missing_evidence": [],
+                "coverage": {"complete": True, "blocking_gaps": [], "caveats": []},
+                "advisory_assessment": "revise",
+            }
+            harness.queue("codex", {"structured": report})
+            rejected = harness.cli(
+                repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex",
+                check=False, provider_backed=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("invented evidence IDs", rejected.stderr)
+            report["issues"][0]["evidence_ids"] = []
+            harness.queue("codex", {"structured": report})
+            accepted = harness.cli(
+                repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex",
+                provider_backed=True,
+            )
+            self.assertEqual(json.loads(accepted.stdout)["issues"], 1)
+            self.assertEqual(len(harness.invocations()), 2)
+
     def test_missing_evidence_requests_revision_before_another_paid_critique(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -208,6 +281,10 @@ class PlanningContractTests(unittest.TestCase):
             }
             harness.queue("codex", {"structured": report})
             harness.cli(repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex", provider_backed=True)
+            staged_prompt = next((harness.plans_dir / session_id / "critiques").glob("*/input/prompt.md")).read_text()
+            self.assertIn("evidence_ids must be []", staged_prompt)
+            self.assertIn('affected_task_ids may contain only ["TASK1"]', staged_prompt)
+            self.assertNotIn("and evidence.json", staged_prompt)
             clean = json.loads(harness.cli(repo, "plan", "continue", session_id).stdout)
             self.assertEqual(clean["next_action"]["action"], "finalize")
 

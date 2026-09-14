@@ -74,6 +74,9 @@ task, and claims. List actual checks, not a generic placeholder. Later rounds
 must retain the list; changing it requires an explicit successor workflow.
 Results remain controller-reported: Merani can detect missing declared results,
 but cannot discover an omitted requirement or prove that a test assertion is true.
+For interactive UI changes, declare checks that exercise the visible state
+transitions, including terminal and replay controls when applicable; pure engine
+tests alone cannot establish those interactions.
 
 ### 2. Check findings and repair confirmed issues
 

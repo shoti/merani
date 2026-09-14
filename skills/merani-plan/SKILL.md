@@ -21,6 +21,12 @@ user's exact intended outcome, non-goals, constraints, repositories, acceptance
 criteria, risk, open questions, authority boundaries, and cross-check policy.
 Ask only when a missing business meaning, account, scope, or authority would
 materially change the plan. Keep working on independent investigation.
+For a plan that will lead directly to mandatory Merani code review, run the
+non-live `doctor` in the same execution boundary before substantial work. It
+checks currently required reviewer authentication and plugin/cache readiness
+without a provider call. Surface a failed check before implementation and
+recheck immediately before code review; a planning READY result does not prove
+that the later code-review gate is available.
 
 Start with a bounded request file for substantive work:
 
@@ -97,6 +103,9 @@ a concrete reproduction and a `low`, `medium`, or `high` confidence value. Every
 name repositories, paths and symbols, dependencies, the concrete behavior
 change, protected invariants, verification, completion criteria, and recovery.
 Every acceptance criterion needs a task and behavior assertion.
+For interactive features, include the important visible state transitions in
+acceptance scenarios and checks, including terminal and restart behavior when
+applicable; engine-only tests cannot establish those browser interactions.
 
 ```bash
 merani plan draft <planning-id> --file plan.json
