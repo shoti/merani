@@ -19,6 +19,7 @@ from merani_core.adapters.planning_service import PlanningService
 from merani_core.domain.planning import next_action
 from merani_core.domain.planning_contract import (
     content_sha256,
+    critique_schema,
     validate_controller_review,
     validate_context_request,
     validate_plan_draft,
@@ -509,6 +510,77 @@ class PlanningContractTests(unittest.TestCase):
 
 
 class PlanningCliTests(unittest.TestCase):
+    def test_claude_plan_schema_is_accepted_and_keeps_required_critique(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            harness = FakeProviderHarness(root / "harness")
+            legacy_schema = critique_schema("plan")
+            legacy_schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+            rejected = subprocess.run(
+                [str(harness.bin_dir / "claude"), "-p", "--json-schema", json.dumps(legacy_schema)],
+                input="Synthetic schema check only.", text=True, capture_output=True,
+                cwd=repo, env=harness.environment, check=False,
+            )
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn("no schema with key or ref", rejected.stderr)
+
+            planning_id = json.loads(harness.cli(
+                repo, "plan", "start", "--repo", str(repo), "--task",
+                "Plan a local retry correction.", "--risk", "consequential", "--provider", "claude",
+            ).stdout)["session_id"]
+            context_path = root / "context.json"
+            write_json(context_path, context_request(repo))
+            context_sha = json.loads(harness.cli(
+                repo, "plan", "context", planning_id, "--file", str(context_path),
+            ).stdout)["context_sha256"]
+            draft_path = root / "draft.json"
+            write_json(draft_path, plan_draft())
+            draft_sha = json.loads(harness.cli(
+                repo, "plan", "draft", planning_id, "--file", str(draft_path),
+            ).stdout)["draft_sha256"]
+            request_sha = json.loads((harness.plans_dir / planning_id / "session.json").read_text())["request_sha256"]
+            critique = {
+                "artifact_type": "planning_plan_critique", "schema_version": 1,
+                "request_sha256": request_sha, "context_sha256": context_sha,
+                "evidence_sha256": content_sha256({}), "draft_sha256": draft_sha,
+                "issues": [], "missing_evidence": [],
+                "coverage": {"complete": True, "blocking_gaps": [], "caveats": []},
+                "advisory_assessment": "acceptable",
+            }
+            harness.queue("claude", {
+                "kind": "failure", "stderr": "Synthetic provider process failure.",
+            })
+            failed = harness.cli(
+                repo, "plan", "review", planning_id, "--stage", "plan", "--provider", "claude",
+                check=False, provider_backed=True,
+            )
+            self.assertEqual(failed.returncode, 2)
+            failed_session = json.loads((harness.plans_dir / planning_id / "session.json").read_text())
+            self.assertIsNone(failed_session["current_critiques"]["plan"])
+            status = json.loads(harness.cli(repo, "plan", "status", planning_id).stdout)
+            self.assertEqual(status["allowance"]["per_provider"]["claude"]["used"], 1)
+
+            harness.queue("claude", {"structured": critique})
+            reviewed = json.loads(harness.cli(
+                repo, "plan", "review", planning_id, "--stage", "plan", "--provider", "claude",
+                provider_backed=True,
+            ).stdout)
+            self.assertEqual(reviewed["issues"], 0)
+            current = json.loads((harness.plans_dir / planning_id / "session.json").read_text())
+            self.assertIsNotNone(current["current_critiques"]["plan"])
+            resumed_status = json.loads(harness.cli(repo, "plan", "status", planning_id).stdout)
+            self.assertEqual(resumed_status["allowance"]["per_provider"]["claude"]["used"], 2)
+            self.assertEqual(len(harness.invocations()), 2)
+            for invocation in harness.invocations():
+                schema_arg = invocation["args"]
+                provider_schema = json.loads(schema_arg[schema_arg.index("--json-schema") + 1])
+                self.assertNotIn("$schema", provider_schema)
+                self.assertEqual(provider_schema["properties"]["artifact_type"]["const"], "planning_plan_critique")
+                self.assertFalse(provider_schema["additionalProperties"])
+
     def test_rejected_provider_reports_keep_terminal_categories_and_no_current_critique(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

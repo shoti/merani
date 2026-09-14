@@ -134,6 +134,11 @@ if provider == "claude" and args == ["auth", "status"]:
         raise SystemExit(1)
     print(json.dumps({"loggedIn": True, "authMethod": "oauth", "subscription": "synthetic"}))
     raise SystemExit(0)
+if provider == "claude" and "--json-schema" in args:
+    schema = json.loads(args[args.index("--json-schema") + 1])
+    if schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema":
+        print('Error: --json-schema is not a valid JSON Schema: no schema with key or ref "https://json-schema.org/draft/2020-12/schema"', file=sys.stderr)
+        raise SystemExit(1)
 if provider == "agy" and args == ["models"]:
     print("fake-model")
     raise SystemExit(0)
