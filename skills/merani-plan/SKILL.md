@@ -5,6 +5,11 @@ description: Investigate a repository and produce a resumable, evidence-backed i
 
 # Merani Plan
 
+For a planning latency investigation that also includes code review, use the
+read-only `../merani/scripts/merani_timeline.py` export on the exact two
+lineage directories. The event timestamps and provider receipts do not measure
+all local CLI or controller time; see `../../docs/benchmark-timeline.md`.
+
 Create a self-contained implementation plan while keeping project source and
 external systems unchanged. Codex owns repository investigation, evidence
 collection, design, dispositions, and the final readiness decision. External

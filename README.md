@@ -23,6 +23,12 @@ task graph, and optionally asks a fresh reviewer to critique the evidence and
 final plan. It publishes deterministic Markdown backed by private hash-bound
 records without creating a fake code diff.
 
+For benchmark or incident analysis, the offline
+[`merani_timeline.py`](skills/merani/scripts/merani_timeline.py) command joins
+one planning lineage and one code-review lineage from private attempt receipts.
+It reports measured provider time and cost while leaving unmeasured controller
+and full CLI-local time explicit. See [the timeline guide](docs/benchmark-timeline.md).
+
 Claude Code is the default reviewer. A separate Codex session, Antigravity
 (Gemini), and Kimi are optional primary reviewers. Merani preflights Codex as a
 standby and automatically switches to it on a typed Claude subscription usage

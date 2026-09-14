@@ -181,6 +181,11 @@ exits 3. Reflection publication warnings never replace the primary command exit.
 
 ## Return a useful result
 
+For elapsed-time investigations, use the read-only `scripts/merani_timeline.py`
+export with the exact planning and review lineage directories. Its provider
+receipts do not measure the controller's full task or full CLI-local time; see
+`../../docs/benchmark-timeline.md` before attributing a wall-clock remainder.
+
 Lead with what was reviewed and the outcome. Summarize confirmed fixes, unresolved
 concerns, check results, and the next action. Name the reviewers that actually
 succeeded and distinguish local checks, CI, and runtime evidence. Keep workflow
