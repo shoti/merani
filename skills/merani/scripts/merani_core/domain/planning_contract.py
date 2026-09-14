@@ -745,8 +745,8 @@ def critique_schema(stage: str) -> dict[str, Any]:
     if stage == "plan":
         properties["draft_sha256"] = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         required.append("draft_sha256")
+    # Claude CLI cannot resolve the Draft 2020-12 metaschema in --json-schema.
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": False,
         "required": required,
