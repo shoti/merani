@@ -65,6 +65,12 @@ that expose repository commands.
 At the start of that thread Merani runs `doctor` before creating a workflow.
 Tasks that need GitHub or GCP add explicit authentication requirements; local
 reviews do not require unrelated cloud accounts.
+When a planning task will be followed by mandatory Merani code review, run the
+non-live `doctor` before substantial implementation and again before review.
+It reports current reviewer readiness without spending a provider attempt;
+planning `READY` does not mean a later code-review gate is available. For
+interactive apps, include browser state transitions such as terminal replay in
+the declared checks as well as engine tests.
 
 Or use the command:
 
@@ -103,6 +109,13 @@ Planning critiques separate blocking missing-input gaps from informational
 static-review and provenance caveats. The latter remain visible in the final
 artifact. `plan status` reports lineage evidence revisions and per-provider
 attempt usage so an exhausted review is shown as blocked before another call.
+Missing evidence in a current critique directs continuation to a new evidence
+revision; unreadable attempt receipts block further provider admission.
+Planning reviewer prompts list the exact staged evidence and task IDs permitted
+in critique references. If no evidence records are staged, an issue uses an
+empty `evidence_ids` list; acceptance-criterion IDs are not substituted for
+evidence. Invalid references still reject the critique and consume the
+attempt that was launched.
 
 Planning sessions live separately under `~/.codex/merani-plans` or an absolute
 `MERANI_PLANS_DIR`. Host Codex collects authorized evidence and imports a

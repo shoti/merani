@@ -61,6 +61,12 @@ request with `--request-file`, but it cannot raise lineage attempt or evidence
 cycle limits, add providers, or raise the Claude per-call cap. A superseded
 session remains readable and cannot regain READY or be exported as current
 authority.
+After controller dispositions, a current critique that names `missing_evidence`
+routes `continue` to evidence collection before another provider review. If
+the evidence-revision ceiling is exhausted, status blocks instead of spending
+an attempt on the same packet. Unreadable or invalid attempt metadata also
+blocks lineage allowance calculations, including in successors, until its
+accounting can be inspected.
 Reimporting an identical validated evidence packet reuses its current revision
 without invalidating critiques or consuming a cycle. A changed packet needs a
 fresh revision and is rejected when the lineage ceiling is exhausted.

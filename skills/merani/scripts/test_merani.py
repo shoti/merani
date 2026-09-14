@@ -5354,6 +5354,37 @@ None.
                 metadata["failure"]["type"], "stale_runner_recovered"
             )
 
+    def test_recover_settles_orphaned_receipt_without_erasing_reported_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            run_dir = root / "private-runs" / "run-stale"
+            run_dir.mkdir(parents=True)
+            MM.safe_write_json(run_dir / "metadata.json", {
+                "schema_version": 15,
+                "status": "running",
+                "created_at": MM.utc_now(),
+                "started_at": MM.utc_now(),
+                "runner_pid": 999999,
+                "provider_attempts": [
+                    {"attempt_id": "completed", "provider": "claude", "state": "completed",
+                     "outcome": "returned", "usage_status": "reported", "usage": {"total_cost_usd": 0.25}},
+                    {"attempt_id": "orphaned", "provider": "codex", "state": "launched",
+                     "outcome": "unknown", "usage_status": "unknown", "usage": None},
+                ],
+            })
+            args = MM.build_parser().parse_args(["recover", "--run", str(run_dir)])
+            with mock.patch.object(MM, "process_is_alive", return_value=False):
+                self.assertEqual(MM.recover_command(args), 0)
+            receipts = MM.read_json(run_dir / "metadata.json")["provider_attempts"]
+            self.assertEqual(receipts[0]["state"], "completed")
+            self.assertEqual(receipts[0]["usage"], {"total_cost_usd": 0.25})
+            self.assertEqual(receipts[1]["state"], "interrupted")
+            self.assertEqual(receipts[1]["outcome"], "interrupted")
+            self.assertEqual(receipts[1]["usage_status"], "unknown")
+
     def test_recover_releases_orphaned_provider_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

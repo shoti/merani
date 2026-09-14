@@ -86,7 +86,15 @@ Critiques are produced through a provider JSON schema. Evidence critiques bind
 the request, context, and evidence hashes. Plan critiques also bind the exact
 draft hash. Issues contain `id`, severity, assessment, title, reason,
 `evidence_ids`, and `affected_task_ids`. Coverage has exactly `complete`,
-`blocking_gaps`, and `caveats`. Missing relevant input belongs in
+`blocking_gaps`, and `caveats`.
+`evidence_ids` can name only records in the staged `evidence.json`; use `[]`
+when none are staged. Acceptance-criterion IDs from `request.json` are a
+different namespace and belong in the issue explanation, not `evidence_ids`.
+`affected_task_ids` can name only staged `plan.json` tasks; use `[]` during an
+evidence critique. The runner rejects invented references without accepting
+the provider report.
+
+Missing relevant input belongs in
 `blocking_gaps` with `complete=false`; honest static-review, scope, and
 provenance notes belong in `caveats` and remain in the final Markdown and JSON.
 Legacy `limitations` coverage is ambiguous and cannot satisfy a current gate.

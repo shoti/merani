@@ -177,6 +177,152 @@ def planning_request(repo: Path) -> dict[str, object]:
 
 
 class PlanningContractTests(unittest.TestCase):
+    def test_critique_prompt_distinguishes_evidence_tasks_and_criteria(self) -> None:
+        bindings = {"request_sha256": "request", "context_sha256": "context", "evidence_sha256": "evidence"}
+        without_evidence = PlanningService._critique_prompt(
+            "plan", bindings, evidence_staged=False, evidence_ids=[], task_ids=["TASK1"]
+        )
+        self.assertIn("evidence_ids must be []", without_evidence)
+        self.assertIn("Acceptance-criterion IDs are not evidence IDs", without_evidence)
+        self.assertIn('affected_task_ids may contain only ["TASK1"]', without_evidence)
+        self.assertNotIn("Read evidence.json", without_evidence)
+        self.assertNotIn("and evidence.json", without_evidence)
+
+        with_evidence = PlanningService._critique_prompt(
+            "plan", bindings, evidence_staged=True, evidence_ids=["EV1"], task_ids=["TASK1"]
+        )
+        self.assertIn('evidence_ids may contain only ["EV1"]', with_evidence)
+        self.assertNotIn("evidence_ids must be []", with_evidence)
+        self.assertIn("evidence.json", with_evidence)
+
+        evidence_stage = PlanningService._critique_prompt(
+            "evidence", bindings, evidence_staged=True, evidence_ids=["EV1"], task_ids=[]
+        )
+        self.assertIn("affected_task_ids must be []", evidence_stage)
+
+    def test_plan_critique_without_evidence_rejects_criterion_as_evidence_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            harness = FakeProviderHarness(root / "harness")
+            request_file = root / "request.json"
+            write_json(request_file, planning_request(repo))
+            session_id = json.loads(harness.cli(
+                repo, "plan", "start", "--request-file", str(request_file)
+            ).stdout)["session_id"]
+            context_file = root / "context.json"
+            write_json(context_file, context_request(repo))
+            context = json.loads(harness.cli(repo, "plan", "context", session_id, "--file", str(context_file)).stdout)
+            draft_file = root / "draft.json"
+            write_json(draft_file, plan_draft())
+            draft = json.loads(harness.cli(repo, "plan", "draft", session_id, "--file", str(draft_file)).stdout)
+            session = json.loads((harness.plans_dir / session_id / "session.json").read_text())
+            issue = {
+                "id": "ISSUE1", "severity": "medium", "assessment": "supported",
+                "title": "Verify the acceptance path", "reason": "The plan needs a concrete acceptance check.",
+                "evidence_ids": ["AC1"], "affected_task_ids": ["TASK1"],
+            }
+            report = {
+                "artifact_type": "planning_plan_critique", "schema_version": 1,
+                "request_sha256": session["request_sha256"],
+                "context_sha256": context["context_sha256"],
+                "evidence_sha256": content_sha256({}),
+                "draft_sha256": draft["draft_sha256"],
+                "issues": [issue], "missing_evidence": [],
+                "coverage": {"complete": True, "blocking_gaps": [], "caveats": []},
+                "advisory_assessment": "revise",
+            }
+            harness.queue("codex", {"structured": report})
+            rejected = harness.cli(
+                repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex",
+                check=False, provider_backed=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("invented evidence IDs", rejected.stderr)
+            report["issues"][0]["evidence_ids"] = []
+            harness.queue("codex", {"structured": report})
+            accepted = harness.cli(
+                repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex",
+                provider_backed=True,
+            )
+            self.assertEqual(json.loads(accepted.stdout)["issues"], 1)
+            self.assertEqual(len(harness.invocations()), 2)
+
+    def test_missing_evidence_requests_revision_before_another_paid_critique(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            harness = FakeProviderHarness(root / "harness")
+            session_id = json.loads(harness.cli(
+                repo, "plan", "start", "--repo", str(repo), "--task",
+                "Plan a bounded retry change.", "--risk", "consequential",
+                "--provider", "codex", "--max-provider-attempts", "3",
+            ).stdout)["session_id"]
+            context_file = root / "context.json"
+            write_json(context_file, context_request(repo))
+            context = json.loads(harness.cli(repo, "plan", "context", session_id, "--file", str(context_file)).stdout)
+            draft_file = root / "draft.json"
+            write_json(draft_file, plan_draft())
+            draft = json.loads(harness.cli(repo, "plan", "draft", session_id, "--file", str(draft_file)).stdout)
+            session = json.loads((harness.plans_dir / session_id / "session.json").read_text())
+            report = {
+                "artifact_type": "planning_plan_critique", "schema_version": 1,
+                "request_sha256": session["request_sha256"],
+                "context_sha256": context["context_sha256"],
+                "evidence_sha256": content_sha256({}),
+                "draft_sha256": draft["draft_sha256"],
+                "issues": [], "missing_evidence": [],
+                "coverage": {"complete": True, "blocking_gaps": [], "caveats": []},
+                "advisory_assessment": "acceptable",
+            }
+            harness.queue("codex", {"structured": report})
+            harness.cli(repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex", provider_backed=True)
+            staged_prompt = next((harness.plans_dir / session_id / "critiques").glob("*/input/prompt.md")).read_text()
+            self.assertIn("evidence_ids must be []", staged_prompt)
+            self.assertIn('affected_task_ids may contain only ["TASK1"]', staged_prompt)
+            self.assertNotIn("and evidence.json", staged_prompt)
+            clean = json.loads(harness.cli(repo, "plan", "continue", session_id).stdout)
+            self.assertEqual(clean["next_action"]["action"], "finalize")
+
+            report["missing_evidence"] = ["A bounded retry trace is absent."]
+            harness.queue("codex", {"structured": report})
+            harness.cli(repo, "plan", "review", session_id, "--stage", "plan", "--provider", "codex", provider_backed=True)
+            incomplete = json.loads(harness.cli(repo, "plan", "continue", session_id).stdout)
+            self.assertEqual(incomplete["next_action"]["action"], "collect_evidence")
+            self.assertFalse(incomplete["next_action"]["provider_call"])
+            self.assertEqual(len(harness.invocations()), 2)
+
+    def test_unreadable_attempt_metadata_blocks_lineage_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            initialize_repo(repo)
+            store = PlanningStore(root / "plans", permission_hint=lambda _: "")
+            parent, parent_dir = store.create(planning_request(repo))
+            attempt_dir = parent_dir / "critiques" / "critique-corrupt"
+            attempt_dir.mkdir()
+            metadata = attempt_dir / "metadata.json"
+            write_json(metadata, {"reservation_id": "reservation-old", "provider_attempts": [{
+                "attempt_id": "attempt-old", "provider": "codex", "state": "launched",
+            }]})
+            used = store.usage_summary(parent, providers=["codex"], maximum=1, evidence_maximum=0)
+            self.assertEqual(used["per_provider"]["codex"]["used"], 1)
+            child, _ = store.create(planning_request(repo))
+            store.update(child, lambda session: session.update({"lineage_id": parent, "supersedes": parent}))
+            metadata.write_text("{corrupt", encoding="utf-8")
+            with self.assertRaisesRegex(ReviewError, "attempt metadata"):
+                store.reserve_attempt(child, provider="codex", stage="plan", maximum=1)
+            write_json(metadata, {"reservation_id": "reservation-old", "provider_attempts": [{
+                "attempt_id": "attempt-old", "provider": "unrecognized", "state": "launched",
+            }]})
+            with self.assertRaisesRegex(ReviewError, "Invalid planning attempt metadata"):
+                store.reserve_attempt(child, provider="codex", stage="plan", maximum=1)
+
     def test_concurrent_provider_reservation_and_receipt_count_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -191,7 +337,7 @@ class PlanningContractTests(unittest.TestCase):
             self.assertEqual(len([result for result in results if "exhausted" in result]), 1)
             attempt_dir = session_dir / "critiques" / "critique-test"
             attempt_dir.mkdir()
-            write_json(attempt_dir / "metadata.json", {"reservation_id": successes[0], "provider_attempts": [{"provider": "claude", "state": "launched", "usage": None}]})
+            write_json(attempt_dir / "metadata.json", {"reservation_id": successes[0], "provider_attempts": [{"attempt_id": "attempt-test", "provider": "claude", "state": "launched", "usage": None}]})
             usage = store.usage_summary(session_id, providers=["claude"], maximum=1, evidence_maximum=0)
             self.assertEqual(usage["per_provider"]["claude"], {"used": 1, "reserved": 0, "remaining": 0, "limit": 1})
             self.assertEqual(len(usage["active_ownership"]), 1)
@@ -264,7 +410,7 @@ class PlanningContractTests(unittest.TestCase):
         request = planning_request(Path("/tmp/repository"))
         request["policy"]["cross_check"] = "required"
         context = {"evidence_needs": []}
-        action = next_action(session={}, request=request, context=context, evidence=None, draft={"tasks": []}, evidence_critique_current=False, plan_critique_current=True, evidence_critique_present=False, plan_critique_present=True, evidence_decisions_complete=True, plan_decisions_complete=False, finalized=False)
+        action = next_action(session={}, request=request, context=context, evidence=None, draft={"tasks": []}, evidence_critique_current=False, plan_critique_current=True, evidence_critique_present=False, plan_critique_present=True, evidence_critique_missing_evidence=False, plan_critique_missing_evidence=False, evidence_decisions_complete=True, plan_decisions_complete=False, finalized=False)
         self.assertEqual(action["action"], "decide")
         self.assertIn("plan critique", action["reason"])
 
@@ -946,7 +1092,8 @@ class PlanningCliTests(unittest.TestCase):
                 harness.cli(repo, "plan", "status", planning_id).stdout
             )
             self.assertEqual(status["status"], "BLOCKED")
-            self.assertEqual(status["next_action"]["action"], "review_plan")
+            self.assertEqual(status["next_action"]["action"], "collect_evidence")
+            self.assertFalse(status["next_action"]["provider_call"])
 
     def test_context_blocks_sensitive_untracked_path_before_provider_use(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

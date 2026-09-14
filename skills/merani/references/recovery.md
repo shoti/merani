@@ -72,6 +72,10 @@ independently of later source, parsing, or metadata failures. A definite
 preflight block has no receipt and consumes no attempt. `continue` uses these
 facts, so a successful peer is preserved and an indeterminate provider is not
 launched a second time silently.
+For an orphaned `preflight` or `running` run, `merani recover --run <run-dir>`
+marks the run failed and settles any pending or launched receipts as interrupted
+with unknown usage. Already completed receipts and reported usage remain intact.
+Recovery never relaunches a reviewer.
 
 If Claude reached its native per-review API-equivalent stop, do not blindly
 repeat the same cap or lower both effort and the stop.
