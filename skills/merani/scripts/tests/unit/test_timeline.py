@@ -39,10 +39,20 @@ class TimelineTests(unittest.TestCase):
                 "workflow_id": "review-a", "provider_attempts": [one],
             })
             write_json(review / "run-2" / "metadata.json", {
-                "workflow_id": "review-b", "provider_attempts": [one],
+                "workflow_id": "review-b", "provider_attempts": [
+                    receipt("other", "2026-01-01T00:00:03Z", "2026-01-01T00:00:04Z", 1, 0.2),
+                ],
             })
             with self.assertRaisesRegex(ValueError, "different workflows"):
                 build_report(None, review)
+            selected = build_report(None, review, review_workflows=("review-a",))
+            self.assertEqual(selected["summary"]["external_attempts"], 1)
+            self.assertEqual(selected["summary"]["reported_api_equivalent_usd"], 0.1)
+            successors = build_report(None, review, review_workflows=("review-a", "review-b"))
+            self.assertEqual(successors["summary"]["external_attempts"], 2)
+            self.assertEqual(successors["summary"]["reported_api_equivalent_usd"], 0.3)
+            with self.assertRaisesRegex(ValueError, "has no runs"):
+                build_report(None, review, review_workflows=("missing",))
             changed = dict(one, duration_seconds=2)
             write_json(review / "run-2" / "metadata.json", {
                 "workflow_id": "review-a", "provider_attempts": [changed],

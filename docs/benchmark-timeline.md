@@ -16,7 +16,10 @@ python3 skills/merani/scripts/merani_timeline.py \
 
 The output contains no repository roots, private store paths, prompts, reports,
 source, or token-bearing diagnostics. It counts a repeated attempt ID once and
-rejects conflicting duplicates or mixed lineage identities. `not_started`
+rejects conflicting duplicates or mixed workflow identities unless every
+included workflow is explicitly selected with repeated `--review-workflow`
+flags. Selectors must resolve in the chosen review directory; unselected
+workflows are excluded. `not_started`
 reservations are not provider attempts. A launched, interrupted, or resumed
 attempt with unknown duration or cost stays unknown; a recovery timestamp is
 not treated as the subprocess end. `known_provider_duration_seconds` sums known
@@ -95,3 +98,49 @@ between evidence critique and the first draft. There is no demonstrated Merani
 processing slowdown to optimize from these sessions. A lower end-to-end elapsed
 time in a future run would require controlled, non-concurrent repetitions with
 controller gaps bounded; this export itself does not make reviews faster.
+
+## Later HTTP framing session, 2026-09-14
+
+The later `http_framing_benchmark_awake` Merani lane ran from 13:34:53.638 to
+14:27:53.908 UTC (**3,180.271 s** by its benchmark clock). Four planning
+critiques consumed **454.280 s** of recorded Claude subprocess time. Five
+code-review attempts across two successive workflows consumed **1,172.611 s**;
+the nine receipts total **1,626.891 s**. Their occupied timestamp intervals
+total **1,626.693 s**. The primary controller trace has **234.065 s** in paired
+tool spans containing Merani CLI commands outside those provider intervals,
+**30.413 s** in other paired tool spans, and **1,289.099 s** without a paired
+tool or provider interval. Tool spans include process setup and possibly
+several commands; they are not exact local CLI time. There is no matching plain
+lane in this benchmark directory or controlled before/after speed measurement.
+
+The four plan critiques raised different concrete issues, including a broken
+shell verification command. The first code-review confirmation found an O(n²)
+per-byte parser scan and a missing incremental-feed test. A source fix required
+a successor workflow; its first repair review found an additional atomicity
+test gap, followed by repair and fresh confirmation. These rounds supplied
+observable value. Dropping critiques, the successor, or confirmation would
+weaken the evidence for this session.
+
+The controller also submitted several ready claim assurances through repeated
+single-claim `assure` invocations. Both `assure` and `assure-batch` call the same
+transaction validator and freshness check. In isolated temporary repositories
+with a fake provider and four claims, three alternating measurements gave
+**1.290–1.303 s** for four single CLI calls and **0.322–0.326 s** for one batch
+call. The final assurance documents matched after timestamp fields were
+removed. Batching ready decisions on one run therefore removes redundant CLI
+and validation work without reducing reviewer rounds or changing the gate.
+The measured local saving is about one second per four-claim group; the larger
+controller tool-call envelopes cannot be assigned to CLI execution alone.
+
+This session has two successor workflow IDs under one review directory. To
+reproduce the combined receipt summary, pass both exact IDs:
+
+```bash
+python3 skills/merani/scripts/merani_timeline.py \
+  --plan-dir "$HOME/.codex/merani-plans/<planning-id>" \
+  --review-dir "$HOME/.codex/review-runs/<review-directory>" \
+  --review-workflow "<first-workflow-id>" \
+  --review-workflow "<successor-workflow-id>" \
+  --start 2026-09-14T13:34:53.638Z \
+  --finish 2026-09-14T14:27:53.908Z
+```

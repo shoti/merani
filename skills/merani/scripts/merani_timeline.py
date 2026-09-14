@@ -110,9 +110,18 @@ def _occupied(attempts: list[dict[str, Any]]) -> float | None:
 def build_report(
     plan_dir: Path | None, review_dir: Path | None,
     start: str | None = None, finish: str | None = None,
+    review_workflows: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     if plan_dir is None and review_dir is None:
         raise ValueError("Select at least one lineage.")
+    if review_workflows is not None and review_dir is None:
+        raise ValueError("Review workflow selectors require a review directory.")
+    selected_workflows = set(review_workflows or ())
+    if review_workflows is not None and (
+        not selected_workflows or len(selected_workflows) != len(review_workflows)
+        or any(not item.strip() for item in review_workflows)
+    ):
+        raise ValueError("Review workflow selectors must be distinct nonempty IDs.")
     if (start is None) != (finish is None):
         raise ValueError("Benchmark start and finish must be supplied together.")
     clock_start, clock_finish = _time(start), _time(finish)
@@ -150,14 +159,18 @@ def build_report(
             _event(events, "planning", "plan_finalized", _read(path).get("finalized_at"))
     if review_dir is not None:
         workflow_id: str | None = None
+        found_workflows: set[str] = set()
         for path in (review_dir).glob("*/metadata.json"):
             metadata = _read(path)
             current_id = metadata.get("workflow_id")
             if not isinstance(current_id, str):
                 raise ValueError("Review workflow identity is missing.")
-            if workflow_id is not None and workflow_id != current_id:
+            if selected_workflows and current_id not in selected_workflows:
+                continue
+            if not selected_workflows and workflow_id is not None and workflow_id != current_id:
                 raise ValueError("Review runs belong to different workflows.")
             workflow_id = current_id
+            found_workflows.add(current_id)
             phase = metadata.get("phase", "unknown")
             if phase not in ("repair", "confirmation"):
                 phase = "unknown"
@@ -175,6 +188,8 @@ def build_report(
                     _event(events, "review", kind, _read(artifact).get(field))
         if workflow_id is None:
             raise ValueError("Selected review lineage has no runs.")
+        if selected_workflows != found_workflows and selected_workflows:
+            raise ValueError("A selected review workflow has no runs in this directory.")
     events.sort(key=lambda item: _time(item["at"]))
     attempts.sort(key=lambda item: _time(item["reserved_at"]) or datetime.min.replace(tzinfo=timezone.utc))
     duration_values = [item["duration_seconds"] for item in attempts]
@@ -210,12 +225,19 @@ def build_report(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan-dir", type=Path, help="One private planning session directory")
-    parser.add_argument("--review-dir", type=Path, help="One private code-review workflow directory")
+    parser.add_argument("--review-dir", type=Path, help="Private directory containing review runs")
+    parser.add_argument(
+        "--review-workflow", action="append", dest="review_workflows",
+        help="Include this exact workflow ID from the review directory; repeat for successors",
+    )
     parser.add_argument("--start", help="Optional benchmark UTC start (ISO-8601)")
     parser.add_argument("--finish", help="Optional benchmark UTC finish (ISO-8601)")
     args = parser.parse_args()
     try:
-        report = build_report(args.plan_dir, args.review_dir, args.start, args.finish)
+        report = build_report(
+            args.plan_dir, args.review_dir, args.start, args.finish,
+            tuple(args.review_workflows) if args.review_workflows else None,
+        )
     except ValueError as exc:
         parser.error(str(exc))
     print(json.dumps(report, indent=2, sort_keys=True))
